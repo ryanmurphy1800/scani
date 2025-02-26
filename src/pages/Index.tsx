@@ -1,4 +1,3 @@
-
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -53,6 +52,7 @@ const Index = () => {
   const recentScans: Product[] = [
     {
       name: "Daily Moisturizer",
+      brand: "Natural Care",
       timestamp: "2 hours ago",
       safetyScore: 92,
       status: "safe",
@@ -60,6 +60,7 @@ const Index = () => {
     },
     {
       name: "Facial Cleanser",
+      brand: "Pure Beauty",
       timestamp: "5 hours ago",
       safetyScore: 75,
       status: "moderate",
@@ -67,6 +68,7 @@ const Index = () => {
     },
     {
       name: "Night Serum",
+      brand: "Skin Science",
       timestamp: "1 day ago",
       safetyScore: 88,
       status: "safe",
@@ -207,7 +209,7 @@ const Index = () => {
                   <div className="flex items-center gap-2">
                     <span className="text-xl font-semibold">{scan.safetyScore}</span>
                     <Badge
-                      variant={scan.status === "safe" ? "default" : scan.status === "moderate" ? "warning" : "destructive"}
+                      variant={scan.status === "safe" ? "default" : scan.status === "moderate" ? "secondary" : "destructive"}
                     >
                       {scan.status}
                     </Badge>
