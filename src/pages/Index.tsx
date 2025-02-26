@@ -1,4 +1,3 @@
-
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,12 +8,12 @@ import {
   Plus, 
   Scan, 
   ScanBarcode, 
-  Droplet, 
-  Sun, 
-  Eye, 
-  Heart
+  LogOut
 } from "lucide-react";
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { supabase } from "@/integrations/supabase/client";
+import { useToast } from "@/components/ui/use-toast";
 
 interface Product {
   name: string;
@@ -27,6 +26,22 @@ interface Product {
 
 const Index = () => {
   const [manualBarcode, setManualBarcode] = useState("");
+  const navigate = useNavigate();
+  const { toast } = useToast();
+
+  const handleLogout = async () => {
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+      navigate("/auth");
+    } catch (error: any) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    }
+  };
 
   const trendingProducts: Product[] = [
     {
@@ -100,6 +115,14 @@ const Index = () => {
             </Button>
             <Button variant="default" size="sm" className="gap-2">
               <Plus className="h-4 w-4" /> Add Product
+            </Button>
+            <Button 
+              variant="outline"
+              size="sm"
+              onClick={handleLogout}
+              className="gap-2"
+            >
+              <LogOut className="h-4 w-4" /> Logout
             </Button>
           </div>
         </div>
