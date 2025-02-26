@@ -9,7 +9,93 @@ export type Json =
 export type Database = {
   public: {
     Tables: {
-      [_ in never]: never
+      products: {
+        Row: {
+          barcode: string
+          brand: string
+          created_at: string | null
+          id: string
+          name: string
+          safety_score: number
+          tags: string[] | null
+        }
+        Insert: {
+          barcode: string
+          brand: string
+          created_at?: string | null
+          id?: string
+          name: string
+          safety_score: number
+          tags?: string[] | null
+        }
+        Update: {
+          barcode?: string
+          brand?: string
+          created_at?: string | null
+          id?: string
+          name?: string
+          safety_score?: number
+          tags?: string[] | null
+        }
+        Relationships: []
+      }
+      profiles: {
+        Row: {
+          created_at: string | null
+          id: string
+          updated_at: string | null
+          username: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          id: string
+          updated_at?: string | null
+          username?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          id?: string
+          updated_at?: string | null
+          username?: string | null
+        }
+        Relationships: []
+      }
+      scans: {
+        Row: {
+          id: string
+          product_id: string
+          scanned_at: string | null
+          user_id: string
+        }
+        Insert: {
+          id?: string
+          product_id: string
+          scanned_at?: string | null
+          user_id: string
+        }
+        Update: {
+          id?: string
+          product_id?: string
+          scanned_at?: string | null
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "scans_product_id_fkey"
+            columns: ["product_id"]
+            isOneToOne: false
+            referencedRelation: "products"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "scans_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never
