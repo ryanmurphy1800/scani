@@ -102,7 +102,7 @@ export const SubscriptionProvider = ({ children }: { children: React.ReactNode }
       setIsLoading(true);
       const { data, error } = await supabase.functions.invoke('create-checkout-session', {
         body: {
-          price_id: 'price_1QxhihFSDRhP1UWw5Jxd42HI', // The price ID provided
+          price_id: 'price_1QxhihFSDRhP1UWw5Jxd42HI', // Updated to use the provided price ID
           success_url: window.location.origin + '/subscription?success=true',
           cancel_url: window.location.origin + '/subscription?canceled=true',
         },
