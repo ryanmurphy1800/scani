@@ -8,7 +8,8 @@ import {
   Scan, 
   ScanBarcode, 
   LogOut,
-  Settings
+  Settings,
+  CreditCard
 } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -17,6 +18,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { ProfileSettings } from "@/components/ProfileSettings";
 import { ScanHistory } from "@/components/ScanHistory";
 import { useAuth } from "@/contexts/AuthContext";
+import { useSubscription } from "@/contexts/SubscriptionContext";
 
 const Index = () => {
   const [manualBarcode, setManualBarcode] = useState("");
@@ -24,6 +26,7 @@ const Index = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { session } = useAuth();
+  const { subscription } = useSubscription();
 
   const handleLogout = async () => {
     try {
@@ -120,6 +123,13 @@ const Index = () => {
             >
               <Settings className="h-5 w-5" />
             </Button>
+            <Button 
+              variant="ghost" 
+              size="icon"
+              onClick={() => navigate('/subscription')}
+            >
+              <CreditCard className="h-5 w-5" />
+            </Button>
             <Button variant="default" size="sm" className="gap-2">
               <Plus className="h-4 w-4" /> Add Product
             </Button>
@@ -140,6 +150,31 @@ const Index = () => {
           <ProfileSettings />
         ) : (
           <>
+            {/* Subscription Status */}
+            <Card className="mb-8 bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-200">
+              <CardContent className="p-4">
+                <div className="flex justify-between items-center">
+                  <div className="flex items-center gap-2">
+                    <CreditCard className="h-5 w-5 text-blue-600" />
+                    <span className="font-semibold">Subscription Status:</span>
+                  </div>
+                  <div>
+                    {subscription?.status === 'active' ? (
+                      <Badge className="bg-green-500">Active</Badge>
+                    ) : (
+                      <Button 
+                        size="sm" 
+                        variant="outline"
+                        onClick={() => navigate('/subscription')}
+                      >
+                        Manage Subscription
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            
             {/* Scanner Section */}
             <Card className="mb-8">
               <CardHeader>
@@ -182,3 +217,6 @@ const Index = () => {
 };
 
 export default Index;
+
+// Missing import
+import { Badge } from "@/components/ui/badge";
