@@ -19,6 +19,7 @@ import { ProfileSettings } from "@/components/ProfileSettings";
 import { ScanHistory } from "@/components/ScanHistory";
 import { useAuth } from "@/contexts/AuthContext";
 import { useSubscription } from "@/contexts/SubscriptionContext";
+import { Badge } from "@/components/ui/badge";
 
 const Index = () => {
   const [manualBarcode, setManualBarcode] = useState("");
@@ -217,6 +218,3 @@ const Index = () => {
 };
 
 export default Index;
-
-// Missing import
-import { Badge } from "@/components/ui/badge";
