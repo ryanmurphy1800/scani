@@ -8,7 +8,6 @@ const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY') || '', {
 })
 
 // We'll need to get the webhook secret from the environment
-// NOTE: You should set this in the Supabase dashboard after creating a webhook in Stripe
 const webhookSecret = Deno.env.get('STRIPE_WEBHOOK_SECRET') || ''
 
 const supabaseClient = createClient(
@@ -16,13 +15,25 @@ const supabaseClient = createClient(
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 )
 
+// CORS headers for browser requests
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+}
+
 serve(async (req) => {
+  // Handle CORS preflight requests
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { headers: corsHeaders });
+  }
+  
   const signature = req.headers.get('stripe-signature')
 
   if (!signature) {
     console.error('No Stripe signature found')
     return new Response(JSON.stringify({ error: 'No signature provided' }), {
       status: 400,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     })
   }
 
@@ -36,6 +47,7 @@ serve(async (req) => {
       console.error(`Webhook signature verification failed: ${err.message}`)
       return new Response(JSON.stringify({ error: 'Invalid signature' }), {
         status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       })
     }
 
@@ -120,11 +132,13 @@ serve(async (req) => {
 
     return new Response(JSON.stringify({ received: true }), {
       status: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     })
   } catch (error) {
     console.error('Error processing webhook:', error)
     return new Response(JSON.stringify({ error: error.message }), {
       status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     })
   }
 })
