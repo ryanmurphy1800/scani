@@ -19,15 +19,12 @@ port = 54324
 
 [auth]
 enabled = true
-port = 54325
 
 [realtime]
 enabled = true
-port = 54326
 
 [storage]
 enabled = true
-port = 54327
 
 [functions]
 [functions.create-checkout-session]
@@ -38,4 +35,3 @@ verify_jwt = true
 
 [functions.stripe-webhook]
 verify_jwt = false
-
