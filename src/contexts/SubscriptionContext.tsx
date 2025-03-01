@@ -39,7 +39,17 @@ export const SubscriptionProvider = ({ children }: { children: React.ReactNode }
           .maybeSingle();
 
         if (error) throw error;
-        setSubscription(data);
+        
+        // Type casting to ensure status matches the expected union type
+        if (data) {
+          const validStatus = data.status as Subscription['status'];
+          setSubscription({
+            ...data,
+            status: validStatus,
+          });
+        } else {
+          setSubscription(null);
+        }
       } catch (err: any) {
         console.error('Error fetching subscription:', err);
         setError(err);
@@ -62,7 +72,13 @@ export const SubscriptionProvider = ({ children }: { children: React.ReactNode }
           filter: `user_id=eq.${session.user.id}`,
         },
         (payload) => {
-          setSubscription(payload.new as Subscription);
+          // Type casting for the realtime updates as well
+          const newData = payload.new as any;
+          const validStatus = newData.status as Subscription['status'];
+          setSubscription({
+            ...newData,
+            status: validStatus,
+          });
         }
       )
       .subscribe();
