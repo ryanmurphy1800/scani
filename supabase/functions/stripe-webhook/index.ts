@@ -7,6 +7,8 @@ const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY') || '', {
   apiVersion: '2023-10-16',
 })
 
+// We'll need to get the webhook secret from the environment
+// NOTE: You should set this in the Supabase dashboard after creating a webhook in Stripe
 const webhookSecret = Deno.env.get('STRIPE_WEBHOOK_SECRET') || ''
 
 const supabaseClient = createClient(
@@ -18,6 +20,7 @@ serve(async (req) => {
   const signature = req.headers.get('stripe-signature')
 
   if (!signature) {
+    console.error('No Stripe signature found')
     return new Response(JSON.stringify({ error: 'No signature provided' }), {
       status: 400,
     })
@@ -44,20 +47,34 @@ serve(async (req) => {
       const customerId = session.customer
       const subscriptionId = session.subscription
 
+      console.log('Checkout session completed:', { customerId, subscriptionId })
+
       if (customerId && subscriptionId) {
         // Get subscription details
         const subscription = await stripe.subscriptions.retrieve(subscriptionId)
         const userId = session.metadata?.user_id
 
+        console.log('Subscription retrieved:', { 
+          status: subscription.status, 
+          currentPeriodEnd: subscription.current_period_end,
+          userId
+        })
+
         if (userId) {
           // Update subscription in database
-          await supabaseClient.from('subscriptions').upsert({
+          const { data, error } = await supabaseClient.from('subscriptions').upsert({
             user_id: userId,
             stripe_customer_id: customerId,
             stripe_subscription_id: subscriptionId,
             status: subscription.status,
             current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
           })
+
+          if (error) {
+            console.error('Error updating subscription in database:', error)
+          } else {
+            console.log('Subscription updated in database:', data)
+          }
         }
       }
     } else if (event.type === 'customer.subscription.updated' || 
@@ -66,22 +83,38 @@ serve(async (req) => {
       const subscriptionId = subscription.id
       const customerId = subscription.customer
 
-      // Find the user by customer ID
-      const { data } = await supabaseClient
+      console.log(`Subscription ${event.type.split('.')[2]}:`, { 
+        subscriptionId, 
+        customerId, 
+        status: subscription.status
+      })
+
+      // Find the user by subscription ID
+      const { data, error } = await supabaseClient
         .from('subscriptions')
         .select('user_id')
         .eq('stripe_subscription_id', subscriptionId)
         .single()
 
-      if (data) {
+      if (error) {
+        console.error('Error finding subscription in database:', error)
+      } else if (data) {
+        console.log('Found subscription in database:', data)
+        
         // Update subscription status
-        await supabaseClient.from('subscriptions').upsert({
+        const { error: updateError } = await supabaseClient.from('subscriptions').upsert({
           user_id: data.user_id,
           stripe_customer_id: customerId,
           stripe_subscription_id: subscriptionId,
           status: subscription.status,
           current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
         })
+
+        if (updateError) {
+          console.error('Error updating subscription status:', updateError)
+        } else {
+          console.log('Subscription status updated successfully')
+        }
       }
     }
 

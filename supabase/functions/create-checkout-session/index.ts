@@ -13,8 +13,9 @@ const corsHeaders = {
 }
 
 serve(async (req) => {
+  // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders })
+    return new Response(null, { headers: corsHeaders })
   }
 
   try {
@@ -103,6 +104,13 @@ serve(async (req) => {
         user_id: user.id,
       },
     })
+
+    // Log the session for debugging
+    console.log('Created checkout session:', { 
+      sessionId: session.id,
+      userId: user.id,
+      customerId: customerId
+    });
 
     return new Response(JSON.stringify({ url: session.url }), {
       status: 200,

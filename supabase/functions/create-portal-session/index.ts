@@ -13,8 +13,9 @@ const corsHeaders = {
 }
 
 serve(async (req) => {
+  // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders })
+    return new Response(null, { headers: corsHeaders })
   }
 
   try {
@@ -59,11 +60,18 @@ serve(async (req) => {
       )
     }
 
-    // Create a portal session
+    // Create a billing portal session
     const session = await stripe.billingPortal.sessions.create({
       customer: customer_id,
-      return_url,
+      return_url: return_url,
     })
+
+    // Log the session for debugging
+    console.log('Created portal session:', { 
+      sessionId: session.id,
+      userId: user.id,
+      customerId: customer_id 
+    });
 
     return new Response(JSON.stringify({ url: session.url }), {
       status: 200,
