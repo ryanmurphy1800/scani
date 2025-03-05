@@ -1,4 +1,3 @@
-
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -116,7 +115,7 @@ const Index = () => {
   };
 
   return (
-    <div className="min-h-screen animate-fade-in">
+    <div className="animate-fade-in">
       {/* Navigation */}
       <nav className="sticky top-0 z-50 glassmorphism border-b border-gray-200/80 dark:border-gray-800/80 px-4 py-3">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
@@ -160,7 +159,7 @@ const Index = () => {
         </div>
       </nav>
 
-      <div className="max-w-7xl mx-auto px-4 py-8">
+      <div className="max-w-7xl mx-auto px-4 py-8 pb-16">
         {showSettings ? (
           <ProfileSettings />
         ) : (

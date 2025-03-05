@@ -1,4 +1,3 @@
-
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
@@ -57,62 +56,66 @@ const AuthPage = () => {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 animate-fade-in">
-      <Card className="w-full max-w-md glassmorphism border-none shadow-lg">
-        <CardHeader className="space-y-1 pt-8">
-          <CardTitle className="text-2xl font-display text-center">
-            {isLogin ? "Sign in to Scani" : "Create a Scani account"}
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="p-6">
-          <form onSubmit={handleAuth} className="space-y-6">
-            <div className="space-y-1">
-              <Input
-                type="email"
-                placeholder="Email address"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                className="ios-input focus:ring-2 focus:ring-blue-400 transition-all duration-200"
-              />
-            </div>
-            <div className="space-y-1">
-              <Input
-                type="password"
-                placeholder="Password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                className="ios-input focus:ring-2 focus:ring-blue-400 transition-all duration-200"
-              />
-            </div>
-            <div>
+    <div className="animate-fade-in">
+      <div className="max-w-md mx-auto px-4 py-12">
+        <div className="text-center mb-8">
+          <h1 className="text-3xl font-display font-bold text-blue-600 dark:text-blue-400">Scani</h1>
+          <p className="text-gray-600 dark:text-gray-400 mt-2">
+            {isLogin ? "Sign in to your account" : "Create a new account"}
+          </p>
+        </div>
+
+        <Card className="ios-card">
+          <CardHeader>
+            <CardTitle className="text-center font-display">
+              {isLogin ? "Welcome Back" : "Get Started"}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleAuth} className="space-y-4">
+              <div className="space-y-2">
+                <Input
+                  type="email"
+                  placeholder="Email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                  className="ios-input"
+                />
+              </div>
+              <div className="space-y-2">
+                <Input
+                  type="password"
+                  placeholder="Password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  className="ios-input"
+                />
+              </div>
               <Button
                 type="submit"
-                className="w-full h-12 bg-blue-500 hover:bg-blue-600 font-medium rounded-xl transition-colors"
+                className="w-full ios-button"
                 disabled={isLoading}
               >
-                {isLoading
-                  ? "Loading..."
-                  : isLogin
-                  ? "Sign In"
-                  : "Sign Up"}
+                {isLoading ? "Loading..." : isLogin ? "Sign In" : "Sign Up"}
+              </Button>
+            </form>
+
+            <div className="mt-4 text-center">
+              <Button
+                variant="link"
+                onClick={() => setIsLogin(!isLogin)}
+                className="text-sm text-blue-600 dark:text-blue-400"
+              >
+                {isLogin
+                  ? "Don't have an account? Sign Up"
+                  : "Already have an account? Sign In"}
               </Button>
             </div>
-          </form>
-          <div className="mt-6 text-center">
-            <Button
-              variant="link"
-              onClick={() => setIsLogin(!isLogin)}
-              className="text-blue-500 hover:text-blue-600 font-medium"
-            >
-              {isLogin
-                ? "Need an account? Sign up"
-                : "Already have an account? Sign in"}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 };

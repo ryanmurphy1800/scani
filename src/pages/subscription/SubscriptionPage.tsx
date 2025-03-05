@@ -1,4 +1,3 @@
-
 import { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
@@ -65,16 +64,23 @@ const SubscriptionPage = () => {
     : null;
   
   return (
-    <div className="min-h-screen p-4 animate-fade-in">
-      <div className="max-w-md mx-auto pt-8 pb-16">
+    <div className="animate-fade-in">
+      <div className="max-w-4xl mx-auto px-4 py-8 pb-16">
         <Button 
           variant="ghost" 
           onClick={() => navigate('/')}
-          className="mb-8 pl-0 flex items-center text-gray-600 dark:text-gray-300 hover:bg-transparent hover:text-gray-900"
+          className="mb-6 flex items-center gap-1"
         >
-          <ChevronLeft className="h-5 w-5 mr-1" />
-          Back
+          <ChevronLeft className="h-4 w-4" />
+          Back to Home
         </Button>
+        
+        <div className="text-center mb-8">
+          <h1 className="text-3xl font-display font-bold">Subscription</h1>
+          <p className="text-gray-600 dark:text-gray-400 mt-2">
+            Manage your Scani subscription
+          </p>
+        </div>
         
         {isActive ? (
           <Card className="ios-card animate-scale-in border-green-100 dark:border-green-900">
