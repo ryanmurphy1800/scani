@@ -12,23 +12,58 @@ export async function getCurrentUser() {
 }
 
 /**
- * Get the user's profile data
- * @param userId The user ID to get the profile for
- * @returns The profile data or null if not found
+ * Get the user's profile data, creating a new profile if one doesn't exist
+ * @param userId The user ID
+ * @returns The user's profile data or null if an error occurred
  */
 export async function getUserProfile(userId: string) {
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', userId)
-    .single();
-  
-  if (error) {
-    console.error('Error fetching user profile:', error);
+  try {
+    // First, try to fetch the existing profile
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', userId)
+      .single();
+    
+    // If profile exists, return it
+    if (data) {
+      return data;
+    }
+    
+    // If error is not "No rows found" (PGRST116), it's a different error
+    if (error && error.code !== 'PGRST116') {
+      console.error('Error fetching user profile:', error);
+      return null;
+    }
+    
+    // No profile found, create a new one
+    console.log('No profile found for user, creating new profile:', userId);
+    
+    // Generate a default username from the user ID
+    const defaultUsername = `user_${userId.substring(0, 8)}`;
+    
+    // Create a new profile
+    const { data: newProfile, error: createError } = await supabase
+      .from('profiles')
+      .insert({
+        id: userId,
+        username: defaultUsername,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+    
+    if (createError) {
+      console.error('Error creating user profile:', createError);
+      return null;
+    }
+    
+    return newProfile;
+  } catch (error) {
+    console.error('Unexpected error in getUserProfile:', error);
     return null;
   }
-  
-  return data;
 }
 
 /**

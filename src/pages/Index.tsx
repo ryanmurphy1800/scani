@@ -8,7 +8,8 @@ import {
   ScanBarcode, 
   LogOut,
   Settings,
-  CreditCard
+  CreditCard,
+  User
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
@@ -139,6 +140,14 @@ const Index = () => {
               className="rounded-full"
             >
               <CreditCard className="h-5 w-5" />
+            </Button>
+            <Button 
+              variant="ghost" 
+              size="icon"
+              onClick={() => navigate('/profile')}
+              className="rounded-full"
+            >
+              <User className="h-5 w-5" />
             </Button>
             <Button 
               variant="default" 

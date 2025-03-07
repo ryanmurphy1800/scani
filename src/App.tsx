@@ -10,6 +10,7 @@ import { Footer } from "./components/ui/Footer";
 import Index from "./pages/Index";
 import AuthPage from "./pages/auth/AuthPage";
 import SubscriptionPage from "./pages/subscription/SubscriptionPage";
+import ProfilePage from "./pages/ProfilePage";
 import NotFound from "./pages/NotFound";
 import { useAuth } from "./contexts/AuthContext";
 
@@ -63,6 +64,16 @@ const App = () => (
                   <ProtectedRoute>
                     <Layout>
                       <SubscriptionPage />
+                    </Layout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/profile"
+                element={
+                  <ProtectedRoute>
+                    <Layout>
+                      <ProfilePage />
                     </Layout>
                   </ProtectedRoute>
                 }
