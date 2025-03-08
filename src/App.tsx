@@ -13,6 +13,10 @@ import SubscriptionPage from "./pages/subscription/SubscriptionPage";
 import ProfilePage from "./pages/ProfilePage";
 import NotFound from "./pages/NotFound";
 import { useAuth } from "./contexts/AuthContext";
+import { useEffect } from "react";
+
+// Import debugging utilities
+import '@/utils/debug';
 
 const queryClient = new QueryClient();
 

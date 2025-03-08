@@ -640,12 +640,17 @@ async function enforceRateLimit(): Promise<void> {
  * @returns The API response data
  */
 async function makeApiRequest<T>(endpoint: string, params: Record<string, string> = {}): Promise<T> {
+  ProductDebug.log(`Making API request to endpoint: ${endpoint}`, params);
+  ProductDebug.startTimer(`apiRequest-${endpoint}`);
+  
   try {
     // Enforce rate limiting
+    ProductDebug.log(`Enforcing rate limit before API request`);
     await enforceRateLimit();
     
     // Check network connectivity
     if (!navigator.onLine) {
+      ProductDebug.log(`❌ No internet connection available`);
       throw new NetworkError('No internet connection available', undefined);
     }
     
@@ -655,7 +660,12 @@ async function makeApiRequest<T>(endpoint: string, params: Record<string, string
       url.searchParams.append(key, value);
     });
     
+    ProductDebug.log(`Fetching from URL: ${url.toString()}`);
+    const fetchStartTime = performance.now();
     const response = await fetch(url.toString());
+    const fetchDuration = performance.now() - fetchStartTime;
+    
+    ProductDebug.log(`Fetch completed in ${fetchDuration.toFixed(2)}ms with status: ${response.status} ${response.statusText}`);
     
     if (!response.ok) {
       // Handle different HTTP error scenarios
@@ -664,6 +674,8 @@ async function makeApiRequest<T>(endpoint: string, params: Record<string, string
           // Rate limiting
           const retryAfter = response.headers.get('Retry-After');
           const waitTime = retryAfter ? parseInt(retryAfter) : 5;
+          ProductDebug.log(`⚠️ API rate limit exceeded. Retry after ${waitTime} seconds.`);
+          
           const error = new RateLimitError(
             `API rate limit exceeded. Retry after ${waitTime} seconds.`,
             waitTime
@@ -673,20 +685,25 @@ async function makeApiRequest<T>(endpoint: string, params: Record<string, string
           logError(error, { endpoint, params, retryAfter: waitTime });
           
           // Wait and retry
+          ProductDebug.log(`Waiting ${waitTime} seconds before retrying...`);
           await new Promise(resolve => setTimeout(resolve, waitTime * 1000));
+          ProductDebug.log(`Retrying API request after rate limit wait`);
           return makeApiRequest(endpoint, params);
         }
         
         case 404:
+          ProductDebug.log(`❌ API endpoint not found: ${endpoint}`);
           throw new ProductServiceError(`API endpoint not found: ${endpoint}`);
           
         case 500:
         case 502:
         case 503:
         case 504:
+          ProductDebug.log(`❌ API server error: ${response.status} ${response.statusText}`);
           throw new NetworkError(`API server error: ${response.statusText}`, response.status);
           
         default:
+          ProductDebug.log(`❌ API request failed with status ${response.status}: ${response.statusText}`);
           throw new NetworkError(
             `API request failed with status ${response.status}: ${response.statusText}`,
             response.status
@@ -694,16 +711,26 @@ async function makeApiRequest<T>(endpoint: string, params: Record<string, string
       }
     }
     
+    ProductDebug.log(`Parsing JSON response`);
+    const jsonStartTime = performance.now();
     const data = await response.json();
+    const jsonDuration = performance.now() - jsonStartTime;
+    
+    ProductDebug.log(`JSON parsing completed in ${jsonDuration.toFixed(2)}ms`);
+    ProductDebug.log(`API response data:`, data);
+    
+    ProductDebug.endTimer(`apiRequest-${endpoint}`);
     return data as T;
   } catch (error) {
     // Handle different error types
     if (error instanceof ProductServiceError) {
       // Already a custom error, just log it
+      ProductDebug.error(`Product service error in API request`, error);
       logError(error, { endpoint, params });
       throw error;
     } else if (error instanceof TypeError) {
       // Likely a network error or CORS issue
+      ProductDebug.error(`Network error while making API request`, error);
       const networkError = new NetworkError(
         'Network error while making API request',
         undefined,
@@ -713,11 +740,16 @@ async function makeApiRequest<T>(endpoint: string, params: Record<string, string
       throw networkError;
     } else {
       // Unknown error
+      ProductDebug.error(`Unexpected error in API request`, error);
       const unknownError = new ProductServiceError(
         `Unexpected error in API request: ${(error as Error).message}`
       );
       logError(unknownError, { endpoint, params, originalError: error });
       throw unknownError;
+    }
+  } finally {
+    if (ProductDebug.timers[`apiRequest-${endpoint}`]) {
+      ProductDebug.endTimer(`apiRequest-${endpoint}`);
     }
   }
 }
@@ -728,20 +760,55 @@ async function makeApiRequest<T>(endpoint: string, params: Record<string, string
  * @returns Promise with the product data or null if not found
  */
 export async function fetchProductFromAPI(barcode: string): Promise<OpenBeautyFactsProduct | null> {
+  ProductDebug.log(`Fetching product from API with barcode: ${barcode}`);
+  ProductDebug.startTimer(`fetchProductFromAPI-${barcode}`);
+  
   try {
-    const data = await makeApiRequest<OpenBeautyFactsProduct>(`product/${barcode}.json`);
+    const apiUrl = `product/${barcode}.json`;
+    ProductDebug.log(`Using API endpoint: ${apiUrl}`);
+    
+    const data = await makeApiRequest<OpenBeautyFactsProduct>(apiUrl);
     
     // Check if the product was found
     if (data.status === 0) {
+      ProductDebug.log(`❌ Product not found in API response (status=0)`, data);
       throw new ProductNotFoundError(barcode);
     }
     
+    // Verify the response structure
+    if (!data.product) {
+      ProductDebug.log(`❌ Invalid API response - missing product object`, data);
+      throw new ProductServiceError(`Invalid API response for barcode ${barcode} - missing product object`);
+    }
+    
+    // Check for essential fields
+    const essentialFields = ['product_name', 'brands'];
+    const missingFields = essentialFields.filter(field => !data.product[field]);
+    
+    if (missingFields.length > 0) {
+      ProductDebug.log(`⚠️ API response missing essential fields: ${missingFields.join(', ')}`, data.product);
+    }
+    
+    ProductDebug.log(`✅ Product successfully fetched from API`, {
+      barcode,
+      name: data.product.product_name,
+      brand: data.product.brands,
+      hasImage: !!data.product.image_url,
+      categories: data.product.categories_tags?.length || 0
+    });
+    
+    ProductDebug.endTimer(`fetchProductFromAPI-${barcode}`);
     return data;
   } catch (error) {
     if (error instanceof ProductNotFoundError) {
+      ProductDebug.log(`Product not found in API: ${barcode}`);
       logError(error, { barcode });
+      ProductDebug.endTimer(`fetchProductFromAPI-${barcode}`);
       return null;
     }
+    
+    ProductDebug.error(`Error fetching product from API: ${barcode}`, error);
+    ProductDebug.endTimer(`fetchProductFromAPI-${barcode}`);
     throw error;
   }
 }
@@ -1027,16 +1094,23 @@ export async function searchProductsByIngredient(
  * @returns The saved product data
  */
 export async function saveProductToDatabase(product: Omit<Product, 'id' | 'created_at'>): Promise<Product> {
+  ProductDebug.log(`Saving product to database`, product);
+  ProductDebug.startTimer(`saveProductToDatabase-${product.barcode}`);
+  
   try {
     // Check if product already exists to prevent duplicates
+    ProductDebug.log(`Checking if product already exists in database: ${product.barcode}`);
     const existingProduct = await getProductByBarcode(product.barcode);
     
     if (existingProduct) {
       // Product already exists, return it
+      ProductDebug.log(`Product already exists in database, returning existing record`, existingProduct);
+      ProductDebug.endTimer(`saveProductToDatabase-${product.barcode}`);
       return existingProduct;
     }
     
     // Product doesn't exist, insert it
+    ProductDebug.log(`Product doesn't exist in database, inserting new record`);
     const { data, error } = await supabase
       .from('products')
       .insert([product])
@@ -1044,27 +1118,22 @@ export async function saveProductToDatabase(product: Omit<Product, 'id' | 'creat
       .single();
     
     if (error) {
+      ProductDebug.error(`Failed to save product to database`, error);
       throw new DatabaseError(`Failed to save product to database: ${error.message}`, error);
     }
     
+    ProductDebug.log(`Product successfully saved to database with ID: ${data.id}`, data);
+    
     // Save to cache
+    ProductDebug.log(`Saving product to cache`);
     await saveToCache(data);
     
+    ProductDebug.endTimer(`saveProductToDatabase-${product.barcode}`);
     return data;
   } catch (error) {
-    if (error instanceof ProductServiceError) {
-      // Already a custom error, just log it
-      logError(error, { product });
-      throw error;
-    } else {
-      // Convert to a DatabaseError
-      const dbError = new DatabaseError(
-        `Error saving product to database: ${(error as Error).message}`,
-        error as Error
-      );
-      logError(dbError, { product });
-      throw dbError;
-    }
+    ProductDebug.error(`Error saving product to database: ${product.barcode}`, error);
+    ProductDebug.endTimer(`saveProductToDatabase-${product.barcode}`);
+    throw error;
   }
 }
 
@@ -1218,95 +1287,156 @@ export async function processBarcodeScan(
   barcode: string,
   userId?: string
 ): Promise<{ product: Product; scan: ScanHistory | undefined; source: string }> {
+  ProductDebug.log(`Processing barcode scan: ${barcode}`, { userId });
+  ProductDebug.startTimer('processBarcodeScan');
+  
   // Check if we're online
   const isOnline = isNetworkAvailable();
+  ProductDebug.log(`Network status: ${isOnline ? 'Online' : 'Offline'}`);
   
   // Try to get the product from various sources
   let product: Product | null = null;
   let productSource = '';
   
   // First try cache
+  ProductDebug.log(`Step 1: Checking cache for barcode: ${barcode}`);
+  ProductDebug.startTimer('cacheCheck');
   product = await getFromCache(barcode);
+  ProductDebug.endTimer('cacheCheck');
+  
   if (product) {
     productSource = 'cache';
+    ProductDebug.log(`✅ Product found in cache`, product);
     console.log('Product found in cache', { barcode });
+  } else {
+    ProductDebug.log(`❌ Product not found in cache`);
   }
   
   // Then try database
   if (!product && isOnline) {
+    ProductDebug.log(`Step 2: Checking database for barcode: ${barcode}`);
+    ProductDebug.startTimer('databaseCheck');
     try {
       product = await getProductByBarcode(barcode);
+      ProductDebug.endTimer('databaseCheck');
+      
       if (product) {
         productSource = 'database';
+        ProductDebug.log(`✅ Product found in database`, product);
         console.log('Product found in database', { barcode });
+      } else {
+        ProductDebug.log(`❌ Product not found in database`);
       }
     } catch (error) {
+      ProductDebug.endTimer('databaseCheck');
       // Handle database errors
       if (error instanceof DatabaseError) {
+        ProductDebug.error(`Database error when fetching product`, error);
         console.warn('Database error when fetching product', { barcode, error: error instanceof Error ? error.message : String(error) });
       } else {
+        ProductDebug.error(`Unexpected error when fetching from database`, error);
         throw error;
       }
     }
+  } else if (!product) {
+    ProductDebug.log(`Skipping database check - offline`);
   }
   
   // Finally try API
   if (!product && isOnline) {
+    ProductDebug.log(`Step 3: Checking API for barcode: ${barcode}`);
+    ProductDebug.startTimer('apiCheck');
     try {
       const apiProduct = await fetchProductFromAPI(barcode);
+      
       if (apiProduct) {
         productSource = 'api';
+        ProductDebug.log(`✅ Product found in API`, apiProduct);
         console.log('Product found in API', { barcode });
         
         // Convert API product to our Product format
         const safetyScore = calculateSafetyScore(apiProduct);
+        ProductDebug.log(`Calculated safety score: ${safetyScore}`);
         
         // Save to database
-        product = await saveProductToDatabase({
+        ProductDebug.log(`Saving product to database`);
+        ProductDebug.startTimer('saveToDatabase');
+        
+        const productToSave = {
           barcode,
           name: apiProduct.product.product_name || 'Unknown Product',
           brand: apiProduct.product.brands || 'Unknown Brand',
           safety_score: safetyScore,
           tags: apiProduct.product.categories_tags || []
-        });
+        };
+        
+        ProductDebug.log(`Product data to save:`, productToSave);
+        product = await saveProductToDatabase(productToSave);
+        ProductDebug.endTimer('saveToDatabase');
+        ProductDebug.log(`Product saved to database with ID: ${product.id}`);
+      } else {
+        ProductDebug.log(`❌ Product not found in API`);
       }
+      
+      ProductDebug.endTimer('apiCheck');
     } catch (error) {
+      ProductDebug.endTimer('apiCheck');
       // Handle API errors
       if (error instanceof NetworkError) {
+        ProductDebug.error(`Network error when fetching product from API`, error);
         console.warn('Network error when fetching product from API', { barcode, error: error instanceof Error ? error.message : String(error) });
       } else if (error instanceof ProductNotFoundError) {
+        ProductDebug.log(`Product not found in API: ${barcode}`);
         console.warn('Product not found in API', { barcode });
       } else {
+        ProductDebug.error(`Unexpected error when fetching from API`, error);
         throw error;
       }
     }
+  } else if (!product) {
+    ProductDebug.log(`Skipping API check - ${isOnline ? 'product already found' : 'offline'}`);
   }
   
   // If product not found in any source, throw error
   if (!product) {
+    ProductDebug.log(`❌ Product not found in any source, throwing ProductNotFoundError`);
     throw new ProductNotFoundError(`Product with barcode ${barcode} not found`);
   }
   
   // If product was found in database or API, add to cache
   if (productSource === 'database' || productSource === 'api') {
+    ProductDebug.log(`Saving product to cache`);
+    ProductDebug.startTimer('saveToCache');
     await saveToCache(product);
+    ProductDebug.endTimer('saveToCache');
   }
   
   // Record the scan with offline support
+  ProductDebug.log(`Recording scan with offline support`);
+  ProductDebug.startTimer('recordScan');
   const scanResult = await recordScanWithOfflineSupport(product.id, userId);
+  ProductDebug.endTimer('recordScan');
+  ProductDebug.log(`Scan recorded`, scanResult);
   
   // Randomly clean up expired cache items (1% chance)
   if (Math.random() < 0.01) {
+    ProductDebug.log(`Cleaning up expired cache items`);
     cleanupCache().catch(error => {
+      ProductDebug.error(`Error cleaning up cache`, error);
       logError(error instanceof Error ? error : new Error(String(error)), { context: 'cleanupCache' });
     });
   }
   
-  return {
+  const result = {
     product,
     scan: scanResult.scan,
     source: productSource
   };
+  
+  ProductDebug.log(`Process completed. Product source: ${productSource}`);
+  ProductDebug.endTimer('processBarcodeScan');
+  
+  return result;
 }
 
 /**
@@ -2763,3 +2893,147 @@ export async function needsSync(cacheKey: string, maxAge: number): Promise<boole
 }
 
 // ... rest of the file ... 
+
+// Add debugging utility at the beginning of the file
+/**
+ * Debug utility for product service
+ */
+export const ProductDebug = {
+  enabled: true,
+  timers: {} as Record<string, number>,
+  
+  log: function(message: string, data?: any) {
+    if (!this.enabled) return;
+    
+    const timestamp = new Date().toISOString().split('T')[1];
+    console.log(`[ProductDebug ${timestamp}] ${message}`);
+    if (data !== undefined) {
+      console.log('→ Data:', data);
+    }
+  },
+  
+  error: function(message: string, error: any) {
+    if (!this.enabled) return;
+    
+    const timestamp = new Date().toISOString().split('T')[1];
+    console.error(`[ProductDebug ${timestamp}] ERROR: ${message}`, error);
+  },
+  
+  startTimer: function(label: string) {
+    this.timers[label] = performance.now();
+    this.log(`Timer started: ${label}`);
+  },
+  
+  endTimer: function(label: string) {
+    if (!this.timers[label]) {
+      this.log(`Timer not found: ${label}`);
+      return;
+    }
+    
+    const duration = performance.now() - this.timers[label];
+    this.log(`Timer ${label} completed: ${duration.toFixed(2)}ms`);
+    delete this.timers[label];
+    return duration;
+  },
+  
+  enable: function() {
+    this.enabled = true;
+    this.log('Debugging enabled');
+  },
+  
+  disable: function() {
+    this.log('Debugging disabled');
+    this.enabled = false;
+  },
+  
+  /**
+   * Test direct API access to Open Beauty Facts
+   * @param testBarcode Barcode to test (default: "3057742022697" - L'Oreal product)
+   */
+  testDirectApiAccess: async function(testBarcode: string = "3057742022697") {
+    this.log(`Testing direct API access with barcode: ${testBarcode}`);
+    this.startTimer('directApiTest');
+    
+    try {
+      const apiUrl = `https://world.openbeautyfacts.org/api/v0/product/${testBarcode}.json`;
+      this.log(`Fetching from URL: ${apiUrl}`);
+      
+      const response = await fetch(apiUrl);
+      const responseStatus = `${response.status} ${response.statusText}`;
+      this.log(`API Response status: ${responseStatus}`);
+      
+      const data = await response.json();
+      this.log('API Response data:', data);
+      
+      // Check if the response has the expected structure
+      if (data.status === 1 && data.product) {
+        this.log('✅ API response has valid structure');
+        
+        // Check for essential fields
+        const essentialFields = ['product_name', 'brands', 'categories_tags'];
+        const missingFields = essentialFields.filter(field => !data.product[field]);
+        
+        if (missingFields.length > 0) {
+          this.log(`⚠️ API response is missing some fields: ${missingFields.join(', ')}`);
+        } else {
+          this.log('✅ API response contains all essential fields');
+        }
+      } else {
+        this.log('❌ API response does not have valid structure', data);
+      }
+      
+      this.endTimer('directApiTest');
+      return data;
+    } catch (error) {
+      this.error('Error testing direct API access', error);
+      this.endTimer('directApiTest');
+      throw error;
+    }
+  }
+};
+
+// Make the debug utility available globally for console access
+if (typeof window !== 'undefined') {
+  (window as any).ProductDebug = ProductDebug;
+}
+
+/**
+ * Initialize product debugging tools and make them available in the browser console
+ * Call this function in your app's initialization code
+ */
+export function initProductDebugging(): void {
+  if (typeof window !== 'undefined') {
+    // Make debugging utilities available globally
+    (window as any).ProductDebug = ProductDebug;
+    (window as any).testProductAPI = ProductDebug.testDirectApiAccess;
+    
+    // Add a convenience function to test the entire product lookup process
+    (window as any).testProductLookup = async (barcode: string = "3057742022697") => {
+      console.log(`🔍 Testing product lookup for barcode: ${barcode}`);
+      try {
+        const result = await processBarcodeScan(barcode);
+        console.log(`✅ Product lookup successful:`, result);
+        return result;
+      } catch (error) {
+        console.error(`❌ Product lookup failed:`, error);
+        throw error;
+      }
+    };
+    
+    console.log(`
+    =====================================================
+    🔧 Product debugging tools initialized and available:
+    =====================================================
+    
+    • ProductDebug - Main debugging utility
+      - ProductDebug.enable() - Enable debugging
+      - ProductDebug.disable() - Disable debugging
+    
+    • testProductAPI("barcode") - Test direct API access
+      - Example: testProductAPI("3057742022697")
+    
+    • testProductLookup("barcode") - Test the entire product lookup process
+      - Example: testProductLookup("3057742022697")
+    `);
+  }
+}
