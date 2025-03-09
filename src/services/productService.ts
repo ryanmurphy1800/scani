@@ -125,23 +125,48 @@ export function logError(error: Error, context?: Record<string, unknown>): void 
   // }
 }
 
-// Type for product data from Open Beauty Facts API
-export interface OpenBeautyFactsProduct {
+/**
+ * Interface for Open Food Facts API v3 response
+ */
+export interface OpenFoodFactsProduct {
   code: string;
+  status: string;  // Changed from number to string
   product: {
+    _id: string;  // Changed from code
     product_name: string;
     brands: string;
     image_url?: string;
+    image_front_url?: string;
+    image_ingredients_url?: string;
+    image_nutrition_url?: string;
     ingredients_text?: string;
     categories_tags?: string[];
     labels_tags?: string[];
-    // Add more fields as needed based on the API response
+    nutriscore_grade?: string;
+    nova_group?: number;
+    ecoscore_grade?: string;
+    nutriments?: {
+      energy_kcal_100g?: number;
+      fat_100g?: number;
+      saturated_fat_100g?: number;
+      carbohydrates_100g?: number;
+      sugars_100g?: number;
+      fiber_100g?: number;
+      proteins_100g?: number;
+      salt_100g?: number;
+    };
+    allergens_tags?: string[];
+    ingredients_tags?: string[];
   };
-  status: number;
-  status_verbose: string;
+  result?: {
+    id: string;
+    name: string;
+  };
 }
 
-// Type for category data from Open Beauty Facts API
+/**
+ * Interface for category data from Open Food Facts API
+ */
 export interface Category {
   id: string;
   name: string;
@@ -149,7 +174,9 @@ export interface Category {
   url: string;
 }
 
-// Type for brand data from Open Beauty Facts API
+/**
+ * Interface for brand data from Open Food Facts API
+ */
 export interface Brand {
   id: string;
   name: string;
@@ -157,7 +184,9 @@ export interface Brand {
   url: string;
 }
 
-// Type for ingredient data from Open Beauty Facts API
+/**
+ * Interface for ingredient data from Open Food Facts API
+ */
 export interface Ingredient {
   id: string;
   name: string;
@@ -176,17 +205,38 @@ export interface PopularProductsResponse {
   count: number;
   page: number;
   page_size: number;
-  products: OpenBeautyFactsProduct[];
+  products: OpenFoodFactsProduct[];
   skip: number;
 }
 
-// Type for our application's product model
+/**
+ * Interface for a product in our database
+ */
 export interface Product {
   id: string;
   barcode: string;
   name: string;
   brand: string;
-  safety_score: number;
+  safety_score: number; // We'll repurpose this for food health score
+  image_url?: string;
+  // Food-specific fields (optional for backward compatibility)
+  nutriscoreGrade?: string | null;
+  novaGroup?: number | null;
+  ecoscore?: string | null;
+  nutritionFacts?: {
+    calories: number | null;
+    fat: number | null;
+    saturatedFat: number | null;
+    carbs: number | null;
+    sugars: number | null;
+    fiber: number | null;
+    proteins: number | null;
+    salt: number | null;
+  } | null;
+  allergens?: string[] | null;
+  ingredients?: string[] | null;
+  labels?: string[] | null;
+  categories?: string[] | null;
   tags?: string[];
   created_at?: string | null;
 }
@@ -633,6 +683,10 @@ async function enforceRateLimit(): Promise<void> {
   lastApiCallTime = Date.now();
 }
 
+// Constants for API configuration
+const API_BASE_URL = "https://world.openfoodfacts.org/api/v3/";
+const APP_USER_AGENT = 'Scani-App/1.0 (https://yourappwebsite.com; contact@yourappwebsite.com)';
+
 /**
  * Make a request to the Open Beauty Facts API
  * @param endpoint The API endpoint to call
@@ -655,14 +709,19 @@ async function makeApiRequest<T>(endpoint: string, params: Record<string, string
     }
     
     // Build URL with query parameters
-    const url = new URL(`https://world.openbeautyfacts.org/api/v0/${endpoint}`);
+    const url = new URL(`${API_BASE_URL}${endpoint}`);
     Object.entries(params).forEach(([key, value]) => {
       url.searchParams.append(key, value);
     });
     
     ProductDebug.log(`Fetching from URL: ${url.toString()}`);
     const fetchStartTime = performance.now();
-    const response = await fetch(url.toString());
+    const response = await fetch(url.toString(), {
+      headers: {
+        'User-Agent': APP_USER_AGENT,
+        'Accept': 'application/json'
+      }
+    });
     const fetchDuration = performance.now() - fetchStartTime;
     
     ProductDebug.log(`Fetch completed in ${fetchDuration.toFixed(2)}ms with status: ${response.status} ${response.statusText}`);
@@ -759,7 +818,7 @@ async function makeApiRequest<T>(endpoint: string, params: Record<string, string
  * @param barcode The product barcode to search for
  * @returns Promise with the product data or null if not found
  */
-export async function fetchProductFromAPI(barcode: string): Promise<OpenBeautyFactsProduct | null> {
+export async function fetchProductFromAPI(barcode: string): Promise<OpenFoodFactsProduct | null> {
   ProductDebug.log(`Fetching product from API with barcode: ${barcode}`);
   ProductDebug.startTimer(`fetchProductFromAPI-${barcode}`);
   
@@ -767,11 +826,14 @@ export async function fetchProductFromAPI(barcode: string): Promise<OpenBeautyFa
     const apiUrl = `product/${barcode}.json`;
     ProductDebug.log(`Using API endpoint: ${apiUrl}`);
     
-    const data = await makeApiRequest<OpenBeautyFactsProduct>(apiUrl);
+    const data = await makeApiRequest<OpenFoodFactsProduct>(apiUrl);
     
-    // Check if the product was found
-    if (data.status === 0) {
-      ProductDebug.log(`❌ Product not found in API response (status=0)`, data);
+    // Log the raw API response for debugging
+    ProductDebug.log(`Raw API response for barcode ${barcode}:`, data);
+    
+    // Check if the product was found - UPDATED FOR V3 API
+    if (data.status !== 'success' || data.result?.id !== 'product_found') {
+      ProductDebug.log(`❌ Product not found in API response (status=${data.status}, result.id=${data.result?.id})`, data);
       throw new ProductNotFoundError(barcode);
     }
     
@@ -782,7 +844,7 @@ export async function fetchProductFromAPI(barcode: string): Promise<OpenBeautyFa
     }
     
     // Check for essential fields
-    const essentialFields = ['product_name', 'brands'];
+    const essentialFields = ['product_name', 'brands', 'categories_tags'];
     const missingFields = essentialFields.filter(field => !data.product[field]);
     
     if (missingFields.length > 0) {
@@ -793,8 +855,10 @@ export async function fetchProductFromAPI(barcode: string): Promise<OpenBeautyFa
       barcode,
       name: data.product.product_name,
       brand: data.product.brands,
-      hasImage: !!data.product.image_url,
-      categories: data.product.categories_tags?.length || 0
+      hasImage: !!data.product.image_url || !!data.product.image_front_url,
+      categories: data.product.categories_tags?.length || 0,
+      nutriscore: data.product.nutriscore_grade || 'unknown',
+      novaGroup: data.product.nova_group || 'unknown'
     });
     
     ProductDebug.endTimer(`fetchProductFromAPI-${barcode}`);
@@ -1354,24 +1418,15 @@ export async function processBarcodeScan(
         ProductDebug.log(`✅ Product found in API`, apiProduct);
         console.log('Product found in API', { barcode });
         
-        // Convert API product to our Product format
-        const safetyScore = calculateSafetyScore(apiProduct);
-        ProductDebug.log(`Calculated safety score: ${safetyScore}`);
+        // Convert API product to our Product format using the mapping function
+        const productData = mapApiResponseToProduct(apiProduct, barcode);
         
         // Save to database
         ProductDebug.log(`Saving product to database`);
         ProductDebug.startTimer('saveToDatabase');
         
-        const productToSave = {
-          barcode,
-          name: apiProduct.product.product_name || 'Unknown Product',
-          brand: apiProduct.product.brands || 'Unknown Brand',
-          safety_score: safetyScore,
-          tags: apiProduct.product.categories_tags || []
-        };
-        
-        ProductDebug.log(`Product data to save:`, productToSave);
-        product = await saveProductToDatabase(productToSave);
+        ProductDebug.log(`Product data to save:`, productData);
+        product = await saveProductToDatabase(productData);
         ProductDebug.endTimer('saveToDatabase');
         ProductDebug.log(`Product saved to database with ID: ${product.id}`);
       } else {
@@ -1439,26 +1494,48 @@ export async function processBarcodeScan(
   return result;
 }
 
+// Rename the old function to maintain backward compatibility
+export function calculateSafetyScore(product: OpenFoodFactsProduct): number {
+  return calculateHealthScore(product);
+}
+
 /**
- * Calculate a safety score based on product ingredients and labels
- * This is a placeholder implementation - you'll want to implement your own scoring logic
- * @param product The product data from Open Beauty Facts
- * @returns A safety score between 0-100
+ * Calculate a health score based on Nutri-Score and NOVA group
+ * @param product The Open Food Facts product data
+ * @returns A health score between 0-100
  */
-export function calculateSafetyScore(product: OpenBeautyFactsProduct): number {
-  // This is a simplified placeholder implementation
-  // In a real app, you would analyze ingredients, certifications, etc.
+export function calculateHealthScore(product: OpenFoodFactsProduct): number {
+  // Base score starts at 50 (neutral)
+  let score = 50;
   
-  const hasIngredients = !!product.product.ingredients_text;
-  const labelCount = product.product.labels_tags?.length || 0;
+  // Add points based on Nutri-Score (A=excellent, E=poor)
+  if (product.product.nutriscore_grade) {
+    switch (product.product.nutriscore_grade.toUpperCase()) {
+      case 'A': score += 30; break;
+      case 'B': score += 20; break;
+      case 'C': score += 10; break;
+      case 'D': score -= 10; break;
+      case 'E': score -= 20; break;
+    }
+  }
   
-  // Simple scoring logic - replace with your own algorithm
-  let score = 50; // Default middle score
+  // Subtract points based on NOVA group (1=unprocessed, 4=ultra-processed)
+  if (product.product.nova_group) {
+    switch (product.product.nova_group) {
+      case 1: score += 20; break;
+      case 2: score += 10; break;
+      case 3: score -= 10; break;
+      case 4: score -= 20; break;
+    }
+  }
   
-  if (hasIngredients) score += 10;
-  score += Math.min(labelCount * 5, 30); // Max 30 points from labels
+  // Add points for organic labels
+  const labels = product.product.labels_tags || [];
+  if (labels.some(label => label.includes('organic') || label.includes('bio'))) {
+    score += 10;
+  }
   
-  // Ensure score is between 0-100
+  // Ensure score stays within 0-100 range
   return Math.max(0, Math.min(100, score));
 }
 
@@ -1519,7 +1596,7 @@ function validateProductData(product: ProductContribution): Record<string, strin
 }
 
 /**
- * Store Open Beauty Facts credentials securely
+ * Store Open Food Facts credentials securely
  * @param credentials The credentials to store
  */
 export async function storeCredentials(credentials: OpenFoodFactsCredentials): Promise<void> {
@@ -1534,7 +1611,7 @@ export async function storeCredentials(credentials: OpenFoodFactsCredentials): P
 }
 
 /**
- * Get stored Open Beauty Facts credentials
+ * Get stored Open Food Facts credentials
  * @returns The stored credentials or null if not found
  */
 async function getCredentials(): Promise<OpenFoodFactsCredentials | null> {
@@ -1550,7 +1627,7 @@ async function getCredentials(): Promise<OpenFoodFactsCredentials | null> {
 }
 
 /**
- * Clear stored Open Beauty Facts credentials
+ * Clear stored Open Food Facts credentials
  */
 export async function clearCredentials(): Promise<void> {
   try {
@@ -1561,10 +1638,10 @@ export async function clearCredentials(): Promise<void> {
 }
 
 /**
- * Submit a new product to the Open Beauty Facts database
+ * Submit a new product to the Open Food Facts database
  * @param product The product data to submit
- * @param credentials Optional credentials (if not provided, stored credentials will be used)
- * @returns The API response
+ * @param credentials Optional credentials for authentication
+ * @returns Status of the submission
  */
 export async function submitNewProduct(
   product: ProductContribution,
@@ -1611,7 +1688,7 @@ export async function submitNewProduct(
     if (product.ingredients_text) formData.append('ingredients_text', product.ingredients_text);
     
     // Make the API request
-    const response = await fetch('https://world.openbeautyfacts.org/cgi/product_jqm2.pl', {
+    const response = await fetch('https://world.openfoodfacts.org/cgi/product_jqm2.pl', {
       method: 'POST',
       body: formData,
     });
@@ -1657,10 +1734,10 @@ export async function submitNewProduct(
 }
 
 /**
- * Update an existing product in the Open Beauty Facts database
- * @param update The product update data
- * @param credentials Optional credentials (if not provided, stored credentials will be used)
- * @returns The API response
+ * Update an existing product in the Open Food Facts database
+ * @param update The product data to update
+ * @param credentials Optional credentials for authentication
+ * @returns Status of the update
  */
 export async function updateExistingProduct(
   update: ProductUpdate,
@@ -1714,7 +1791,7 @@ export async function updateExistingProduct(
     });
     
     // Make the API request
-    const response = await fetch('https://world.openbeautyfacts.org/cgi/product_jqm2.pl', {
+    const response = await fetch('https://world.openfoodfacts.org/cgi/product_jqm2.pl', {
       method: 'POST',
       body: formData,
     });
@@ -1760,12 +1837,12 @@ export async function updateExistingProduct(
 }
 
 /**
- * Upload a product image to the Open Beauty Facts database
+ * Upload a product image to the Open Food Facts database
  * @param barcode The product barcode
  * @param imageFile The image file to upload
- * @param imageType The type of image (front, ingredients, nutrition, etc.)
- * @param credentials Optional credentials (if not provided, stored credentials will be used)
- * @returns The API response
+ * @param imageType The type of image (front, ingredients, etc.)
+ * @param credentials Optional credentials for authentication
+ * @returns Status of the upload
  */
 export async function uploadProductImage(
   barcode: string,
@@ -1831,7 +1908,7 @@ export async function uploadProductImage(
     formData.append('imgupload_' + imageType, imageFile);
     
     // Make the API request
-    const response = await fetch('https://world.openbeautyfacts.org/cgi/product_image_upload.pl', {
+    const response = await fetch('https://world.openfoodfacts.org/cgi/product_image_upload.pl', {
       method: 'POST',
       body: formData,
     });
@@ -1878,8 +1955,8 @@ export async function uploadProductImage(
 }
 
 /**
- * Check if the user has valid credentials for Open Beauty Facts
- * @param credentials Optional credentials to check (if not provided, stored credentials will be used)
+ * Check if the user has valid credentials for Open Food Facts
+ * @param credentials The credentials to check
  * @returns Whether the credentials are valid
  */
 export async function checkCredentials(
@@ -1908,7 +1985,7 @@ export async function checkCredentials(
     formData.append('password', creds.password);
     
     // Make a simple API request to check credentials
-    const response = await fetch('https://world.openbeautyfacts.org/cgi/session.pl', {
+    const response = await fetch('https://world.openfoodfacts.org/cgi/session.pl', {
       method: 'POST',
       body: formData,
     });
@@ -2549,11 +2626,11 @@ initNetworkListeners();
 // Enhanced versions of existing functions that support offline operation
 
 /**
- * Submit a new product to the Open Beauty Facts database with offline support
+ * Submit a new product to the Open Food Facts database with offline support
  * @param product The product data to submit
- * @param credentials Optional credentials (if not provided, stored credentials will be used)
+ * @param credentials Optional credentials for authentication
  * @param options Optional configuration for the operation
- * @returns A promise that resolves when the operation is queued or completed
+ * @returns Status of the submission
  */
 export async function submitNewProductWithOfflineSupport(
   product: ProductContribution,
@@ -2598,9 +2675,9 @@ export async function submitNewProductWithOfflineSupport(
 /**
  * Update an existing product with offline support
  * @param update The product update data
- * @param credentials Optional credentials (if not provided, stored credentials will be used)
+ * @param credentials Optional credentials for authentication
  * @param options Optional configuration for the operation
- * @returns A promise that resolves when the operation is queued or completed
+ * @returns Status of the update
  */
 export async function updateExistingProductWithOfflineSupport(
   update: ProductUpdate,
@@ -2947,15 +3024,15 @@ export const ProductDebug = {
   },
   
   /**
-   * Test direct API access to Open Beauty Facts
-   * @param testBarcode Barcode to test (default: "3057742022697" - L'Oreal product)
+   * Test direct API access to Open Food Facts
+   * @param testBarcode Barcode to test (default: "3017620422003" - Nutella)
    */
-  testDirectApiAccess: async function(testBarcode: string = "3057742022697") {
+  testDirectApiAccess: async function(testBarcode: string = "3017620422003") {
     this.log(`Testing direct API access with barcode: ${testBarcode}`);
     this.startTimer('directApiTest');
     
     try {
-      const apiUrl = `https://world.openbeautyfacts.org/api/v0/product/${testBarcode}.json`;
+      const apiUrl = `${API_BASE_URL}product/${testBarcode}.json`;
       this.log(`Fetching from URL: ${apiUrl}`);
       
       const response = await fetch(apiUrl);
@@ -2965,8 +3042,8 @@ export const ProductDebug = {
       const data = await response.json();
       this.log('API Response data:', data);
       
-      // Check if the response has the expected structure
-      if (data.status === 1 && data.product) {
+      // Check if the response has the expected structure - UPDATED FOR V3 API
+      if (data.status === 'success' && data.result?.id === 'product_found' && data.product) {
         this.log('✅ API response has valid structure');
         
         // Check for essential fields
@@ -2978,8 +3055,32 @@ export const ProductDebug = {
         } else {
           this.log('✅ API response contains all essential fields');
         }
+        
+        // Check for food-specific fields
+        const foodFields = ['nutriscore_grade', 'nova_group', 'nutriments'];
+        const missingFoodFields = foodFields.filter(field => !data.product[field]);
+        
+        if (missingFoodFields.length > 0) {
+          this.log(`⚠️ API response is missing some food-specific fields: ${missingFoodFields.join(', ')}`);
+        } else {
+          this.log('✅ API response contains all food-specific fields');
+        }
+        
+        // Log the extracted product details
+        this.log('Extracted product details:', {
+          name: data.product.product_name,
+          brand: data.product.brands,
+          imageUrl: data.product.image_front_url || data.product.image_url,
+          nutriscore: data.product.nutriscore_grade,
+          novaGroup: data.product.nova_group,
+          categories: data.product.categories_tags?.length
+        });
       } else {
-        this.log('❌ API response does not have valid structure', data);
+        this.log('❌ API response does not have valid structure', {
+          status: data.status,
+          resultId: data.result?.id,
+          hasProductObject: !!data.product
+        });
       }
       
       this.endTimer('directApiTest');
@@ -3005,10 +3106,14 @@ export function initProductDebugging(): void {
   if (typeof window !== 'undefined') {
     // Make debugging utilities available globally
     (window as any).ProductDebug = ProductDebug;
-    (window as any).testProductAPI = ProductDebug.testDirectApiAccess;
+    
+    // Bind the function to the ProductDebug object to fix 'this' context
+    (window as any).testProductAPI = function(barcode) {
+      return ProductDebug.testDirectApiAccess.call(ProductDebug, barcode);
+    };
     
     // Add a convenience function to test the entire product lookup process
-    (window as any).testProductLookup = async (barcode: string = "3057742022697") => {
+    (window as any).testProductLookup = async (barcode: string = "3017620422003") => {
       console.log(`🔍 Testing product lookup for barcode: ${barcode}`);
       try {
         const result = await processBarcodeScan(barcode);
@@ -3030,10 +3135,56 @@ export function initProductDebugging(): void {
       - ProductDebug.disable() - Disable debugging
     
     • testProductAPI("barcode") - Test direct API access
-      - Example: testProductAPI("3057742022697")
+      - Example: testProductAPI("3017620422003")
     
     • testProductLookup("barcode") - Test the entire product lookup process
-      - Example: testProductLookup("3057742022697")
+      - Example: testProductLookup("3017620422003")
     `);
   }
+}
+
+/**
+ * Map an Open Food Facts API v3 response to our Product interface
+ * @param apiProduct The API response product
+ * @param barcode The product barcode
+ * @returns A Product object with data from the API
+ */
+function mapApiResponseToProduct(apiProduct: OpenFoodFactsProduct, barcode: string): Omit<Product, 'id' | 'created_at'> {
+  // Extract nutrition facts from the API response
+  const nutriments = apiProduct.product.nutriments || {};
+  const nutritionFacts = {
+    calories: nutriments.energy_kcal_100g || null,
+    fat: nutriments.fat_100g || null,
+    saturatedFat: nutriments.saturated_fat_100g || null,
+    carbs: nutriments.carbohydrates_100g || null,
+    sugars: nutriments.sugars_100g || null,
+    fiber: nutriments.fiber_100g || null,
+    proteins: nutriments.proteins_100g || null,
+    salt: nutriments.salt_100g || null
+  };
+  
+  // Extract product name and brand, ensuring we have valid values
+  const productName = apiProduct.product.product_name || 'Unknown Product';
+  const brandName = apiProduct.product.brands || 'Unknown Brand';
+  
+  // Get the best available image URL
+  const imageUrl = apiProduct.product.image_front_url || apiProduct.product.image_url || undefined;
+  
+  // Extract other food-specific data
+  return {
+    barcode,
+    name: productName,
+    brand: brandName,
+    safety_score: calculateHealthScore(apiProduct),
+    image_url: imageUrl,
+    nutriscoreGrade: apiProduct.product.nutriscore_grade || null,
+    novaGroup: apiProduct.product.nova_group || null,
+    ecoscore: apiProduct.product.ecoscore_grade || null,
+    nutritionFacts,
+    allergens: apiProduct.product.allergens_tags || null,
+    ingredients: apiProduct.product.ingredients_tags || null,
+    labels: apiProduct.product.labels_tags || null,
+    categories: apiProduct.product.categories_tags || null,
+    tags: apiProduct.product.categories_tags || []
+  };
 }
