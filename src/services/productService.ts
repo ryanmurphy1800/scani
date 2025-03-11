@@ -826,6 +826,12 @@ export async function fetchProductFromAPI(barcode: string): Promise<OpenFoodFact
     const apiUrl = `product/${barcode}.json`;
     ProductDebug.log(`Using API endpoint: ${apiUrl}`);
     
+    // Check network availability before making the request
+    if (!isNetworkAvailable()) {
+      ProductDebug.log(`❌ Network unavailable, cannot fetch from API`);
+      throw new NetworkError('Network unavailable');
+    }
+    
     const data = await makeApiRequest<OpenFoodFactsProduct>(apiUrl);
     
     // Log the raw API response for debugging
@@ -849,6 +855,8 @@ export async function fetchProductFromAPI(barcode: string): Promise<OpenFoodFact
     
     if (missingFields.length > 0) {
       ProductDebug.log(`⚠️ API response missing essential fields: ${missingFields.join(', ')}`, data.product);
+      // Log warning but don't fail - we'll use whatever data we have
+      console.warn('API response missing essential fields', { barcode, missingFields });
     }
     
     ProductDebug.log(`✅ Product successfully fetched from API`, {
@@ -866,12 +874,20 @@ export async function fetchProductFromAPI(barcode: string): Promise<OpenFoodFact
   } catch (error) {
     if (error instanceof ProductNotFoundError) {
       ProductDebug.log(`Product not found in API: ${barcode}`);
-      logError(error, { barcode });
+      logError(error, { barcode, context: 'fetchProductFromAPI' });
       ProductDebug.endTimer(`fetchProductFromAPI-${barcode}`);
       return null;
     }
     
+    if (error instanceof NetworkError) {
+      ProductDebug.log(`Network error when fetching from API: ${barcode}`);
+      logError(error, { barcode, context: 'fetchProductFromAPI' });
+      ProductDebug.endTimer(`fetchProductFromAPI-${barcode}`);
+      throw error;
+    }
+    
     ProductDebug.error(`Error fetching product from API: ${barcode}`, error);
+    logError(error instanceof Error ? error : new Error(String(error)), { barcode, context: 'fetchProductFromAPI' });
     ProductDebug.endTimer(`fetchProductFromAPI-${barcode}`);
     throw error;
   }
@@ -1272,36 +1288,42 @@ export async function recordScan(
   source: 'cache' | 'database' | 'api' = 'database'
 ): Promise<ScanHistory> {
   try {
-    // If userId is not provided or is null, get the current authenticated user's ID
+    // Get current user ID if not provided
     if (!userId) {
       userId = await getCurrentUserId();
       
-      // If still no user ID, throw an authentication error
       if (!userId) {
-        throw new AuthenticationError('User must be authenticated to record a scan');
+        throw new AuthenticationError('User not authenticated');
       }
     }
     
+    // Create scan record
+    const scanData = {
+      product_id: productId,
+      user_id: userId,
+      scanned_at: new Date().toISOString(),
+      source
+    };
+    
+    // Insert into database
     const { data, error } = await supabase
       .from('scans')
-      .insert([
-        {
-          product_id: productId,
-          user_id: userId,
-          scanned_at: new Date().toISOString(),
-          source: source,
-          synced: true
-        },
-      ])
-      .select()
+      .insert(scanData)
+      .select('*')
       .single();
     
-    if (error) throw error;
+    if (error) {
+      throw new DatabaseError(`Error recording scan: ${error.message}`, error);
+    }
     
-    return data;
+    if (!data) {
+      throw new DatabaseError('No data returned after recording scan');
+    }
+    
+    return data as ScanHistory;
   } catch (error) {
-    console.error('Error recording scan:', error);
-    throw new DatabaseError(`Failed to record scan for product ${productId}`, error instanceof Error ? error : undefined);
+    console.error(' Error recording scan:', error);
+    throw error;
   }
 }
 
@@ -1351,64 +1373,16 @@ export async function processBarcodeScan(
   barcode: string,
   userId?: string
 ): Promise<{ product: Product; scan: ScanHistory | undefined; source: string }> {
-  ProductDebug.log(`Processing barcode scan: ${barcode}`, { userId });
+  ProductDebug.log(`Processing barcode scan: ${barcode}`);
   ProductDebug.startTimer('processBarcodeScan');
   
-  // Check if we're online
-  const isOnline = isNetworkAvailable();
-  ProductDebug.log(`Network status: ${isOnline ? 'Online' : 'Offline'}`);
-  
-  // Try to get the product from various sources
   let product: Product | null = null;
   let productSource = '';
+  const isOnline = isNetworkAvailable();
   
-  // First try cache
-  ProductDebug.log(`Step 1: Checking cache for barcode: ${barcode}`);
-  ProductDebug.startTimer('cacheCheck');
-  product = await getFromCache(barcode);
-  ProductDebug.endTimer('cacheCheck');
-  
-  if (product) {
-    productSource = 'cache';
-    ProductDebug.log(`✅ Product found in cache`, product);
-    console.log('Product found in cache', { barcode });
-  } else {
-    ProductDebug.log(`❌ Product not found in cache`);
-  }
-  
-  // Then try database
-  if (!product && isOnline) {
-    ProductDebug.log(`Step 2: Checking database for barcode: ${barcode}`);
-    ProductDebug.startTimer('databaseCheck');
-    try {
-      product = await getProductByBarcode(barcode);
-      ProductDebug.endTimer('databaseCheck');
-      
-      if (product) {
-        productSource = 'database';
-        ProductDebug.log(`✅ Product found in database`, product);
-        console.log('Product found in database', { barcode });
-      } else {
-        ProductDebug.log(`❌ Product not found in database`);
-      }
-    } catch (error) {
-      ProductDebug.endTimer('databaseCheck');
-      // Handle database errors
-      if (error instanceof DatabaseError) {
-        ProductDebug.error(`Database error when fetching product`, error);
-        console.warn('Database error when fetching product', { barcode, error: error instanceof Error ? error.message : String(error) });
-      } else {
-        ProductDebug.error(`Unexpected error when fetching from database`, error);
-        throw error;
-      }
-    }
-  } else if (!product) {
-    ProductDebug.log(`Skipping database check - offline`);
-  }
-  
-  // Finally try API
-  if (!product && isOnline) {
-    ProductDebug.log(`Step 3: Checking API for barcode: ${barcode}`);
+  // Direct API first approach
+  if (isOnline) {
+    ProductDebug.log(`Step 1: Checking API for barcode: ${barcode} (direct API first approach)`);
     ProductDebug.startTimer('apiCheck');
     try {
       const apiProduct = await fetchProductFromAPI(barcode);
@@ -1421,14 +1395,27 @@ export async function processBarcodeScan(
         // Convert API product to our Product format using the mapping function
         const productData = mapApiResponseToProduct(apiProduct, barcode);
         
-        // Save to database
-        ProductDebug.log(`Saving product to database`);
-        ProductDebug.startTimer('saveToDatabase');
+        // Return the product immediately for display
+        product = {
+          ...productData,
+          id: generateUUID(), // Generate a temporary ID for immediate display
+          created_at: new Date().toISOString()
+        };
         
-        ProductDebug.log(`Product data to save:`, productData);
-        product = await saveProductToDatabase(productData);
-        ProductDebug.endTimer('saveToDatabase');
-        ProductDebug.log(`Product saved to database with ID: ${product.id}`);
+        // Save to database in the background
+        ProductDebug.log(`Saving product to database in background`);
+        saveProductToDatabase(productData)
+          .then(savedProduct => {
+            ProductDebug.log(`Product saved to database with ID: ${savedProduct.id}`);
+            // Update cache with the saved product that has a proper database ID
+            saveToCache(savedProduct).catch(cacheError => {
+              ProductDebug.error(`Error saving to cache`, cacheError);
+            });
+          })
+          .catch(saveError => {
+            ProductDebug.error(`Error saving product to database`, saveError);
+            logError(saveError instanceof Error ? saveError : new Error(String(saveError)), { context: 'saveProductToDatabase' });
+          });
       } else {
         ProductDebug.log(`❌ Product not found in API`);
       }
@@ -1445,11 +1432,64 @@ export async function processBarcodeScan(
         console.warn('Product not found in API', { barcode });
       } else {
         ProductDebug.error(`Unexpected error when fetching from API`, error);
-        throw error;
+        // Don't throw here, continue to fallbacks
+        logError(error instanceof Error ? error : new Error(String(error)), { context: 'fetchProductFromAPI' });
+      }
+    }
+  } else {
+    ProductDebug.log(`Skipping API check - offline`);
+  }
+  
+  // If product not found in API, check cache
+  if (!product) {
+    ProductDebug.log(`Step 2: Checking cache for barcode: ${barcode}`);
+    ProductDebug.startTimer('cacheCheck');
+    try {
+      const cachedProduct = await getFromCache(barcode);
+      if (cachedProduct) {
+        product = cachedProduct;
+        productSource = 'cache';
+        ProductDebug.log(`✅ Product found in cache`, cachedProduct);
+      } else {
+        ProductDebug.log(`❌ Product not found in cache`);
+      }
+      ProductDebug.endTimer('cacheCheck');
+    } catch (error) {
+      ProductDebug.endTimer('cacheCheck');
+      ProductDebug.error(`Error checking cache`, error);
+      // Continue to next source
+    }
+  } else {
+    ProductDebug.log(`Skipping cache check - product already found in API`);
+  }
+  
+  // If product not found in cache, check database
+  if (!product && isOnline) {
+    ProductDebug.log(`Step 3: Checking database for barcode: ${barcode}`);
+    ProductDebug.startTimer('databaseCheck');
+    try {
+      const dbProduct = await getProductByBarcode(barcode);
+      if (dbProduct) {
+        product = dbProduct;
+        productSource = 'database';
+        ProductDebug.log(`✅ Product found in database`, dbProduct);
+      } else {
+        ProductDebug.log(`❌ Product not found in database`);
+      }
+      ProductDebug.endTimer('databaseCheck');
+    } catch (error) {
+      ProductDebug.endTimer('databaseCheck');
+      // Handle database errors
+      if (error instanceof DatabaseError) {
+        ProductDebug.error(`Database error when fetching product`, error);
+      } else {
+        ProductDebug.error(`Unexpected error when fetching from database`, error);
+        // Don't throw here, continue to fallbacks
+        logError(error instanceof Error ? error : new Error(String(error)), { context: 'getProductByBarcode' });
       }
     }
   } else if (!product) {
-    ProductDebug.log(`Skipping API check - ${isOnline ? 'product already found' : 'offline'}`);
+    ProductDebug.log(`Skipping database check - ${isOnline ? 'product already found' : 'offline'}`);
   }
   
   // If product not found in any source, throw error
@@ -1548,8 +1588,15 @@ export interface ProductContribution {
   packaging?: string;
   categories?: string;
   labels?: string;
-  ingredients_text?: string;
   image_url?: string;
+  ingredients_text?: string;
+  nutriments?: {
+    [key: string]: number | string;
+  };
+  nutriscoreGrade?: string;
+  novaGroup?: number;
+  ecoscore?: string;
+  safety_score?: number;
 }
 
 // Type for product update data
@@ -2018,18 +2065,46 @@ export enum OperationStatus {
 }
 
 // Operation interface
-export interface QueuedOperation {
+interface QueuedOperationData {
+  // For SUBMIT_PRODUCT
+  product?: ProductContribution;
+  // For UPDATE_PRODUCT
+  update?: ProductUpdate;
+  // For UPLOAD_IMAGE
+  barcode?: string;
+  imageFile?: File;
+  imageType?: ImageType;
+  // For RECORD_SCAN
+  productId?: string;
+  userId?: string;
+  source?: ScanSource;
+  timestamp?: number;
+  // For CUSTOM
+  process?: () => Promise<void>;
+  // Common fields
+  credentials?: OpenFoodFactsCredentials;
+  // Queue status fields
+  isOnline?: boolean;
+  queueSize?: number;
+  processedCount?: number;
+  remainingCount?: number;
+}
+
+interface QueuedOperation {
   id: string;
   type: OperationType;
-  data: any;
+  data: QueuedOperationData;
   status: OperationStatus;
-  createdAt: number;
-  updatedAt: number;
   retryCount: number;
   maxRetries: number;
   nextRetryTime?: number;
   error?: string;
+  createdAt: number;
+  updatedAt: number;
 }
+
+type ImageType = 'ingredients' | 'packaging' | 'front' | 'nutrition' | 'other';
+type ScanSource = 'cache' | 'database' | 'api';
 
 // Queue configuration
 const QUEUE_STORAGE_KEY = 'scani_operation_queue';
@@ -2108,7 +2183,54 @@ export function isNetworkAvailable(): boolean {
     initNetworkListeners();
   }
   
+  // If we're in a browser environment, use navigator.onLine
+  if (typeof navigator !== 'undefined' && 'onLine' in navigator) {
+    // Update our cached value
+    isOnline = navigator.onLine;
+    ProductDebug.log(`Network availability check: ${isOnline ? 'Online' : 'Offline'}`);
+    return isOnline;
+  }
+  
+  // Fallback for non-browser environments
+  ProductDebug.log(`Network availability check: Using cached value ${isOnline ? 'Online' : 'Offline'}`);
   return isOnline;
+}
+
+/**
+ * Actively test network connectivity by making a small request
+ * @returns Promise resolving to whether the network is available
+ */
+export async function testNetworkConnectivity(): Promise<boolean> {
+  ProductDebug.log(`Testing network connectivity...`);
+  
+  try {
+    // Try to fetch a small resource to test connectivity
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+    
+    const response = await fetch('https://world.openfoodfacts.org/api/v2/ping', {
+      method: 'GET',
+      signal: controller.signal,
+      cache: 'no-store'
+    });
+    
+    clearTimeout(timeoutId);
+    
+    const isConnected = response.ok;
+    ProductDebug.log(`Network connectivity test result: ${isConnected ? 'Connected' : 'Disconnected'}`);
+    
+    // Update our cached value
+    isOnline = isConnected;
+    
+    return isConnected;
+  } catch (error) {
+    ProductDebug.error(`Network connectivity test failed`, error);
+    
+    // Update our cached value
+    isOnline = false;
+    
+    return false;
+  }
 }
 
 /**
@@ -2343,109 +2465,103 @@ function calculateBackoffDelay(retryCount: number): number {
  * @returns Whether the operation was processed successfully
  */
 async function processOperation(operation: QueuedOperation): Promise<boolean> {
+  ProductDebug.log(`Processing operation: ${operation.id} (${operation.type})`);
+  
   try {
-    // Update operation status to in progress
-    await updateOperation(operation.id, { status: OperationStatus.IN_PROGRESS });
-    
-    // Process based on operation type
-    switch (operation.type) {
-      case OperationType.SUBMIT_PRODUCT:
-        await submitNewProduct(operation.data.product, operation.data.credentials);
-        break;
-        
-      case OperationType.UPDATE_PRODUCT:
-        await updateExistingProduct(operation.data.update, operation.data.credentials);
-        break;
-        
-      case OperationType.UPLOAD_IMAGE:
-        await uploadProductImage(
-          operation.data.barcode,
-          operation.data.imageFile,
-          operation.data.imageType,
-          operation.data.credentials
-        );
-        break;
-        
-      case OperationType.RECORD_SCAN:
-        // Check if we have a pending-auth userId that needs to be replaced with the current user
-        let userId = operation.data.userId;
-        if (userId === 'pending-auth') {
-          // Get the current authenticated user
-          userId = await getCurrentUserId();
-          
-          // If we still don't have a valid user ID, we can't process this operation
-          if (!userId) {
-            throw new AuthenticationError('User must be authenticated to process scan operation');
-          }
-        }
-        
-        await recordScan(operation.data.productId, userId);
-        break;
-        
-      case OperationType.CUSTOM:
-        // For custom operations, the data should include a process function
-        if (typeof operation.data.process === 'function') {
-          await operation.data.process();
-        } else {
-          throw new QueueError('Custom operation missing process function');
-        }
-        break;
-        
-      default:
-        throw new QueueError(`Unknown operation type: ${operation.type}`);
-    }
-    
-    // Operation completed successfully
-    await updateOperation(operation.id, { status: OperationStatus.COMPLETED });
-    notifyQueueEventListeners('operationCompleted', {
-      ...operation,
-      status: OperationStatus.COMPLETED,
+    // Mark operation as in progress
+    await updateOperation(operation.id, {
+      status: OperationStatus.IN_PROGRESS,
       updatedAt: Date.now()
     });
     
-    return true;
-  } catch (error) {
-    // Handle operation failure
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    
-    // Determine if we should retry
-    if (operation.retryCount < operation.maxRetries) {
-      // Calculate next retry time with exponential backoff
-      const backoffDelay = calculateBackoffDelay(operation.retryCount);
-      const nextRetryTime = Date.now() + backoffDelay;
+    // Process based on operation type
+    switch (operation.type) {
+      case OperationType.SUBMIT_PRODUCT: {
+        const { product, credentials } = operation.data;
+        const result = await submitNewProduct(product, credentials);
+        
+        if (result.statusCode >= 200 && result.statusCode < 300) {
+          return true;
+        } else {
+          throw new ProductServiceError(`Failed to submit product: ${result.message}`);
+        }
+      }
       
-      // Update operation for retry
-      await updateOperation(operation.id, {
-        status: OperationStatus.RETRY,
-        retryCount: operation.retryCount + 1,
-        nextRetryTime,
-        error: errorMessage
-      });
+      case OperationType.UPDATE_PRODUCT: {
+        const { update, credentials } = operation.data;
+        const result = await updateExistingProduct(update, credentials);
+        
+        if (result.statusCode >= 200 && result.statusCode < 300) {
+          return true;
+        } else {
+          throw new ProductServiceError(`Failed to update product: ${result.message}`);
+        }
+      }
       
-      logError(new QueueError(`Operation ${operation.id} failed, will retry in ${Math.round(backoffDelay / 1000)}s`, error as Error), {
-        operationType: operation.type,
-        retryCount: operation.retryCount + 1,
-        maxRetries: operation.maxRetries
-      });
-    } else {
-      // Max retries reached, mark as failed
-      await updateOperation(operation.id, {
-        status: OperationStatus.FAILED,
-        error: errorMessage
-      });
+      case OperationType.UPLOAD_IMAGE: {
+        const { barcode, imageFile, imageType, credentials } = operation.data;
+        const result = await uploadProductImage(barcode, imageFile, imageType, credentials);
+        
+        if (result.statusCode >= 200 && result.statusCode < 300) {
+          return true;
+        } else {
+          throw new ProductServiceError(`Failed to upload image: ${result.message}`);
+        }
+      }
       
-      notifyQueueEventListeners('operationFailed', {
-        ...operation,
-        status: OperationStatus.FAILED,
-        error: errorMessage,
-        updatedAt: Date.now()
-      });
+      case OperationType.RECORD_SCAN: {
+        const { productId, userId, source, timestamp } = operation.data;
+        
+        // If we have a timestamp, convert it to ISO string for the scanned_at field
+        const scannedAt = timestamp ? new Date(timestamp).toISOString() : new Date().toISOString();
+        
+        // Get current user if userId is not provided or is 'pending-auth'
+        let actualUserId = userId;
+        if (!actualUserId || actualUserId === 'pending-auth') {
+          actualUserId = await getCurrentUserId();
+          if (!actualUserId) {
+            throw new AuthenticationError('User not authenticated');
+          }
+        }
+        
+        // Record the scan with the actual user ID
+        await recordScan(productId, actualUserId, source || 'api');
+        return true;
+      }
       
-      logError(new QueueError(`Operation ${operation.id} failed permanently after ${operation.maxRetries} retries`, error as Error), {
-        operationType: operation.type,
-        data: operation.data
-      });
+      case OperationType.CUSTOM: {
+        // Custom operations should provide their own processing logic
+        if (typeof operation.data.process === 'function') {
+          await operation.data.process();
+          return true;
+        } else {
+          throw new QueueError('Custom operation does not provide a process function');
+        }
+      }
+      
+      default:
+        throw new QueueError(`Unknown operation type: ${operation.type}`);
     }
+  } catch (error) {
+    // Handle specific error types
+    if (error instanceof NetworkError) {
+      ProductDebug.error(`Network error when processing operation ${operation.id}`, error);
+      return false; // Network errors should be retried
+    }
+    
+    if (error instanceof AuthenticationError) {
+      ProductDebug.error(`Authentication error when processing operation ${operation.id}`, error);
+      // Authentication errors should not be retried unless we have a way to re-authenticate
+      return operation.retryCount < 1; // Only retry once for auth errors
+    }
+    
+    // Log the error and return false to indicate failure
+    ProductDebug.error(`Error processing operation ${operation.id}`, error);
+    logError(error instanceof Error ? error : new Error(String(error)), {
+      operationType: operation.type,
+      retryCount: operation.retryCount,
+      maxRetries: operation.maxRetries
+    });
     
     return false;
   }
@@ -2810,38 +2926,38 @@ export async function recordScanWithOfflineSupport(
   userId?: string | null,
   options: { maxRetries?: number; forceQueue?: boolean } = {}
 ): Promise<{ scan?: ScanHistory; operationId?: string }> {
-  // If userId is not provided, get the current authenticated user's ID
-  if (!userId) {
-    userId = await getCurrentUserId();
-  }
+  const isOnline = isNetworkAvailable();
   
-  // If we're online and not forcing queue, try to record immediately
-  if (isNetworkAvailable() && !options.forceQueue) {
+  // If we're online and not forcing queue, try to record directly
+  if (isOnline && !options.forceQueue) {
     try {
       const scan = await recordScan(productId, userId);
       return { scan };
     } catch (error) {
-      // If it's not a network error, rethrow
-      if (!(error instanceof NetworkError) && !(error instanceof DatabaseError) && !(error instanceof AuthenticationError)) {
-        throw error;
-      }
-      
-      // Otherwise, fall through to queue the operation
+      // If direct recording fails, fall back to queue
+      ProductDebug.error(`Direct scan recording failed, falling back to queue`, error);
+      console.warn('Direct scan recording failed, falling back to queue', { productId, error: error instanceof Error ? error.message : String(error) });
     }
   }
   
-  // If we still don't have a userId and we're queueing, use a temporary ID
-  // This will be replaced with the actual user ID when the operation is processed
-  const userIdForQueue = userId || 'pending-auth';
-  
-  // Queue the operation for later
-  const operation = await enqueueOperation(
-    OperationType.RECORD_SCAN,
-    { productId, userId: userIdForQueue, scannedAt: new Date().toISOString() },
-    { maxRetries: options.maxRetries }
-  );
-  
-  return { operationId: operation.id };
+  // Queue the operation for later processing
+  try {
+    const operation = await enqueueOperation(
+      OperationType.RECORD_SCAN,
+      {
+        productId,
+        userId,
+        source: 'api', // Default to API as source for queued operations
+        timestamp: Date.now()
+      },
+      { maxRetries: options.maxRetries }
+    );
+    
+    return { operationId: operation.id };
+  } catch (error) {
+    ProductDebug.error(`Failed to queue scan recording`, error);
+    throw new QueueError(`Failed to queue scan recording: ${error instanceof Error ? error.message : String(error)}`, error instanceof Error ? error : undefined);
+  }
 }
 
 /**
@@ -3150,6 +3266,9 @@ export function initProductDebugging(): void {
  * @returns A Product object with data from the API
  */
 function mapApiResponseToProduct(apiProduct: OpenFoodFactsProduct, barcode: string): Omit<Product, 'id' | 'created_at'> {
+  // Log the mapping process
+  ProductDebug.log(`Mapping API response to product model for barcode: ${barcode}`);
+  
   // Extract nutrition facts from the API response
   const nutriments = apiProduct.product.nutriments || {};
   const nutritionFacts = {
@@ -3170,12 +3289,15 @@ function mapApiResponseToProduct(apiProduct: OpenFoodFactsProduct, barcode: stri
   // Get the best available image URL
   const imageUrl = apiProduct.product.image_front_url || apiProduct.product.image_url || undefined;
   
+  // Calculate safety score
+  const safetyScore = calculateHealthScore(apiProduct);
+  
   // Extract other food-specific data
-  return {
+  const mappedProduct = {
     barcode,
     name: productName,
     brand: brandName,
-    safety_score: calculateHealthScore(apiProduct),
+    safety_score: safetyScore,
     image_url: imageUrl,
     nutriscoreGrade: apiProduct.product.nutriscore_grade || null,
     novaGroup: apiProduct.product.nova_group || null,
@@ -3187,4 +3309,27 @@ function mapApiResponseToProduct(apiProduct: OpenFoodFactsProduct, barcode: stri
     categories: apiProduct.product.categories_tags || null,
     tags: apiProduct.product.categories_tags || []
   };
+  
+  // Log the mapped product
+  ProductDebug.log(`Successfully mapped API response to product model`, {
+    barcode,
+    name: mappedProduct.name,
+    brand: mappedProduct.brand,
+    safetyScore: mappedProduct.safety_score,
+    hasImage: !!mappedProduct.image_url
+  });
+  
+  return mappedProduct;
+}
+
+/**
+ * Generate a UUID v4 for temporary use
+ * @returns A UUID v4 string
+ */
+function generateUUID(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
 }
