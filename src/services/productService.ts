@@ -247,9 +247,11 @@ export interface ScanHistory {
   product_id: string;
   user_id: string;
   scanned_at: string | null;
-  source?: 'cache' | 'database' | 'api';
-  synced?: boolean;
-  product?: Product;
+  // Database fields
+  source?: 'cache' | 'database' | 'api';  // Stored in DB as text
+  synced?: boolean;                       // Stored in DB with default FALSE
+  // Application-only fields
+  product?: Product;                      // Joined from the products table, not stored in scans table
 }
 
 // Type for cached product data
@@ -1287,23 +1289,30 @@ export async function recordScan(
   userId?: string | null, 
   source: 'cache' | 'database' | 'api' = 'database'
 ): Promise<ScanHistory> {
+  ProductDebug.log(`Recording scan for product: ${productId}, user: ${userId || 'current user'}, source: ${source}`);
+  ProductDebug.startTimer('recordScan');
+  
   try {
     // Get current user ID if not provided
     if (!userId) {
       userId = await getCurrentUserId();
       
       if (!userId) {
+        ProductDebug.error(`User not authenticated when recording scan`, { userId });
         throw new AuthenticationError('User not authenticated');
       }
     }
     
-    // Create scan record
+    // Create scan record with all fields that exist in the database
     const scanData = {
       product_id: productId,
       user_id: userId,
       scanned_at: new Date().toISOString(),
-      source
+      source, // Now included in the database schema
+      synced: false // Default value, will be updated when synced
     };
+    
+    ProductDebug.log(`Inserting scan record:`, scanData);
     
     // Insert into database
     const { data, error } = await supabase
@@ -1313,16 +1322,25 @@ export async function recordScan(
       .single();
     
     if (error) {
+      ProductDebug.error(`Error recording scan: ${error.message}`, { error });
       throw new DatabaseError(`Error recording scan: ${error.message}`, error);
     }
     
     if (!data) {
+      ProductDebug.error(`No data returned after recording scan`, { productId, userId });
       throw new DatabaseError('No data returned after recording scan');
     }
     
-    return data as ScanHistory;
+    const scanResult: ScanHistory = data;
+    
+    ProductDebug.log(`Scan recorded successfully with ID: ${scanResult.id}`);
+    ProductDebug.endTimer('recordScan');
+    
+    return scanResult;
   } catch (error) {
-    console.error(' Error recording scan:', error);
+    ProductDebug.endTimer('recordScan');
+    ProductDebug.error(`Error recording scan:`, { error });
+    console.error('Error recording scan:', error);
     throw error;
   }
 }
@@ -1334,30 +1352,91 @@ export async function recordScan(
  * @returns Array of scan records with product data
  */
 export async function getUserScanHistory(userId: string, limit = 10): Promise<ScanHistory[]> {
+  ProductDebug.log(`Getting scan history for user: ${userId}, limit: ${limit}`);
+  ProductDebug.startTimer('getUserScanHistory');
+  
   try {
+    // First check if the user exists
+    const { data: userExists, error: userError } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('id', userId)
+      .single();
+    
+    if (userError) {
+      ProductDebug.error(`Error checking if user exists: ${userError.message}`, userError);
+      throw new DatabaseError(`Error checking if user exists: ${userError.message}`, userError);
+    }
+    
+    if (!userExists) {
+      ProductDebug.error(`User not found: ${userId}`, { userId });
+      throw new DatabaseError(`User not found: ${userId}`);
+    }
+    
+    // Get scan history with product data
+    // Use * to select all columns, which will adapt to schema changes
     const { data, error } = await supabase
       .from('scans')
       .select(`
         *,
-        product:products(*)
+        products(*)
       `)
       .eq('user_id', userId)
       .order('scanned_at', { ascending: false })
       .limit(limit);
     
-    if (error) throw error;
+    if (error) {
+      ProductDebug.error(`Error getting user scan history:`, { error });
+      throw new DatabaseError(`Error getting user scan history: ${error.message}`, error);
+    }
+    
+    if (!data || data.length === 0) {
+      ProductDebug.log(`No scan history found for user: ${userId}`);
+      return [];
+    }
+    
+    // Transform the data to match the ScanHistory interface
+    const scanHistory: ScanHistory[] = data.map(scan => {
+      // Extract the product from the nested products object
+      const product = scan.products as unknown as Product;
+      
+      // Create a base scan object with required fields
+      const scanRecord: ScanHistory = {
+        id: scan.id,
+        product_id: scan.product_id,
+        user_id: scan.user_id,
+        scanned_at: scan.scanned_at,
+        product: product
+      };
+      
+      // Add source and synced if they exist in the database record
+      if ('source' in scan && typeof scan.source === 'string') {
+        scanRecord.source = scan.source as 'cache' | 'database' | 'api';
+      }
+      
+      if ('synced' in scan && typeof scan.synced === 'boolean') {
+        scanRecord.synced = scan.synced;
+      }
+      
+      return scanRecord;
+    });
+    
+    ProductDebug.log(`Found ${scanHistory.length} scans for user: ${userId}`);
     
     // Update cache with products from scan history
-    if (data && data.length > 0) {
-      for (const scan of data) {
+    if (scanHistory.length > 0) {
+      for (const scan of scanHistory) {
         if (scan.product) {
           await saveToCache(scan.product);
         }
       }
     }
     
-    return data;
+    ProductDebug.endTimer('getUserScanHistory');
+    return scanHistory;
   } catch (error) {
+    ProductDebug.endTimer('getUserScanHistory');
+    ProductDebug.error(`Error getting user scan history:`, { error });
     console.error('Error getting user scan history:', error);
     throw error;
   }
@@ -2512,9 +2591,6 @@ async function processOperation(operation: QueuedOperation): Promise<boolean> {
       case OperationType.RECORD_SCAN: {
         const { productId, userId, source, timestamp } = operation.data;
         
-        // If we have a timestamp, convert it to ISO string for the scanned_at field
-        const scannedAt = timestamp ? new Date(timestamp).toISOString() : new Date().toISOString();
-        
         // Get current user if userId is not provided or is 'pending-auth'
         let actualUserId = userId;
         if (!actualUserId || actualUserId === 'pending-auth') {
@@ -2524,7 +2600,7 @@ async function processOperation(operation: QueuedOperation): Promise<boolean> {
           }
         }
         
-        // Record the scan with the actual user ID
+        // Record the scan with the actual user ID and source
         await recordScan(productId, actualUserId, source || 'api');
         return true;
       }
@@ -2924,18 +3000,21 @@ export async function uploadProductImageWithOfflineSupport(
 export async function recordScanWithOfflineSupport(
   productId: string,
   userId?: string | null,
-  options: { maxRetries?: number; forceQueue?: boolean } = {}
+  options: { maxRetries?: number; forceQueue?: boolean; source?: 'cache' | 'database' | 'api' } = {}
 ): Promise<{ scan?: ScanHistory; operationId?: string }> {
   const isOnline = isNetworkAvailable();
+  const source = options.source || 'api';
+  
+  ProductDebug.log(`Recording scan with offline support for product: ${productId}, user: ${userId || 'current user'}, source: ${source}`);
   
   // If we're online and not forcing queue, try to record directly
   if (isOnline && !options.forceQueue) {
     try {
-      const scan = await recordScan(productId, userId);
+      const scan = await recordScan(productId, userId, source);
       return { scan };
     } catch (error) {
       // If direct recording fails, fall back to queue
-      ProductDebug.error(`Direct scan recording failed, falling back to queue`, error);
+      ProductDebug.error(`Direct scan recording failed, falling back to queue`, { error, productId });
       console.warn('Direct scan recording failed, falling back to queue', { productId, error: error instanceof Error ? error.message : String(error) });
     }
   }
@@ -2947,15 +3026,16 @@ export async function recordScanWithOfflineSupport(
       {
         productId,
         userId,
-        source: 'api', // Default to API as source for queued operations
+        source,
         timestamp: Date.now()
       },
       { maxRetries: options.maxRetries }
     );
     
+    ProductDebug.log(`Scan queued for later processing with operation ID: ${operation.id}`);
     return { operationId: operation.id };
   } catch (error) {
-    ProductDebug.error(`Failed to queue scan recording`, error);
+    ProductDebug.error(`Failed to queue scan recording`, { error, productId });
     throw new QueueError(`Failed to queue scan recording: ${error instanceof Error ? error.message : String(error)}`, error instanceof Error ? error : undefined);
   }
 }
@@ -2972,6 +3052,7 @@ export async function syncLocalData(options: {
   syncBrands?: boolean;
   syncPopularProducts?: boolean;
   syncUserData?: boolean;
+  syncUnsyncedScans?: boolean;
   userId?: string;
 } = {}): Promise<{
   success: boolean;
@@ -2979,6 +3060,7 @@ export async function syncLocalData(options: {
   brandsUpdated: boolean;
   popularProductsUpdated: boolean;
   userDataUpdated: boolean;
+  unsyncedScansProcessed: number;
   queueProcessed: number;
   errors: string[];
 }> {
@@ -2988,6 +3070,7 @@ export async function syncLocalData(options: {
     brandsUpdated: false,
     popularProductsUpdated: false,
     userDataUpdated: false,
+    unsyncedScansProcessed: 0,
     queueProcessed: 0,
     errors: [] as string[]
   };
@@ -3046,6 +3129,22 @@ export async function syncLocalData(options: {
         result.userDataUpdated = true;
       } catch (error) {
         result.errors.push(`User data sync error: ${(error as Error).message}`);
+        result.success = false;
+      }
+    }
+
+    // Add this code to the syncLocalData function, before the return statement
+    // Sync unsynced scans if requested
+    if ((options.syncUnsyncedScans || options.forceFullSync) && options.userId) {
+      try {
+        ProductDebug.log('Syncing unsynced scans...');
+        const syncedCount = await syncUnsyncedScans(options.userId);
+        result.unsyncedScansProcessed = syncedCount;
+        ProductDebug.log(`Synced ${syncedCount} scans`);
+      } catch (error) {
+        const errorMessage = `Error syncing unsynced scans: ${error instanceof Error ? error.message : String(error)}`;
+        ProductDebug.error(errorMessage, { error });
+        result.errors.push(errorMessage);
         result.success = false;
       }
     }
@@ -3332,4 +3431,346 @@ function generateUUID(): string {
     const v = c === 'x' ? r : (r & 0x3 | 0x8);
     return v.toString(16);
   });
+}
+
+/**
+ * Refresh the Supabase schema cache
+ * This can help resolve issues where the client has an outdated schema
+ * @returns A promise that resolves when the schema has been refreshed
+ */
+export async function refreshSupabaseSchema(): Promise<void> {
+  ProductDebug.log('Refreshing Supabase schema cache');
+  
+  try {
+    // Make a simple query to force a schema refresh
+    await supabase.from('products').select('id').limit(1);
+    await supabase.from('scans').select('id').limit(1);
+    await supabase.from('profiles').select('id').limit(1);
+    
+    // Clear any local caches that might be affected
+    await cleanupCache();
+    
+    ProductDebug.log('Supabase schema cache refreshed successfully');
+  } catch (error) {
+    ProductDebug.error('Error refreshing Supabase schema cache', { error });
+    console.error('Error refreshing Supabase schema cache:', error);
+    throw new DatabaseError('Failed to refresh Supabase schema cache', error instanceof Error ? error : undefined);
+  }
+}
+
+/**
+ * Diagnose scan history issues for a user
+ * This function performs various checks to identify potential issues with scan history
+ * @param userId The ID of the user to diagnose
+ * @returns A diagnostic report
+ */
+export async function diagnoseScanHistoryIssues(userId: string): Promise<{
+  userExists: boolean;
+  scanCount: number;
+  productCount: number;
+  rowLevelSecurityEnabled: boolean;
+  databasePermissions: boolean;
+  issues: string[];
+  recommendations: string[];
+}> {
+  ProductDebug.log(`Diagnosing scan history issues for user: ${userId}`);
+  
+  const issues: string[] = [];
+  const recommendations: string[] = [];
+  let userExists = false;
+  let scanCount = 0;
+  let productCount = 0;
+  let rowLevelSecurityEnabled = true;
+  let databasePermissions = true;
+  
+  try {
+    // Check if user exists
+    const { data: userProfile, error: userError } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('id', userId)
+      .single();
+    
+    if (userError) {
+      if (userError.code === 'PGRST116') {
+        issues.push(`User with ID ${userId} does not exist in the profiles table`);
+        recommendations.push('Create a profile for this user');
+        userExists = false;
+      } else {
+        issues.push(`Error checking user: ${userError.message}`);
+        databasePermissions = false;
+      }
+    } else {
+      userExists = true;
+    }
+    
+    // Check scan count
+    const { count: scans, error: scanCountError } = await supabase
+      .from('scans')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId);
+    
+    if (scanCountError) {
+      issues.push(`Error counting scans: ${scanCountError.message}`);
+      databasePermissions = false;
+    } else {
+      scanCount = scans || 0;
+      if (scanCount === 0) {
+        issues.push('No scans found for this user');
+        recommendations.push('Check if scans are being properly recorded');
+      }
+    }
+    
+    // Check product count
+    const { count: products, error: productCountError } = await supabase
+      .from('products')
+      .select('id', { count: 'exact', head: true });
+    
+    if (productCountError) {
+      issues.push(`Error counting products: ${productCountError.message}`);
+      databasePermissions = false;
+    } else {
+      productCount = products || 0;
+      if (productCount === 0) {
+        issues.push('No products found in the database');
+        recommendations.push('Check if products are being properly saved');
+      }
+    }
+    
+    // Check RLS policies
+    try {
+      // Try to access another user's data to check if RLS is working
+      const { data: otherUserData, error: rlsError } = await supabase
+        .from('scans')
+        .select('id')
+        .neq('user_id', userId)
+        .limit(1);
+      
+      if (!rlsError && otherUserData && otherUserData.length > 0) {
+        // If we can access other users' data, RLS might not be properly configured
+        rowLevelSecurityEnabled = false;
+        issues.push('Row Level Security may not be properly configured');
+        recommendations.push('Review RLS policies for the scans table');
+      }
+    } catch (error) {
+      // Expected error if RLS is working correctly
+      rowLevelSecurityEnabled = true;
+    }
+    
+    // Check for schema issues
+    try {
+      // Try to select a non-existent column to check schema
+      const { error: schemaError } = await supabase
+        .from('scans')
+        .select('non_existent_column')
+        .limit(1);
+      
+      if (schemaError) {
+        // This is expected
+      }
+    } catch (error) {
+      issues.push('Schema validation error occurred');
+      recommendations.push('Refresh the Supabase schema cache');
+    }
+    
+    // Add general recommendations
+    if (issues.length === 0) {
+      recommendations.push('No issues detected. If problems persist, check network connectivity and browser console for errors');
+    } else {
+      recommendations.push('Check browser console for detailed error messages');
+      recommendations.push('Verify that the user has the correct permissions');
+      recommendations.push('Try refreshing the Supabase schema cache');
+    }
+    
+    return {
+      userExists,
+      scanCount,
+      productCount,
+      rowLevelSecurityEnabled,
+      databasePermissions,
+      issues,
+      recommendations
+    };
+  } catch (error) {
+    ProductDebug.error('Error diagnosing scan history issues', { error, userId });
+    
+    issues.push(`Unexpected error during diagnosis: ${error instanceof Error ? error.message : String(error)}`);
+    recommendations.push('Check browser console for detailed error messages');
+    
+    return {
+      userExists: false,
+      scanCount: 0,
+      productCount: 0,
+      rowLevelSecurityEnabled: true,
+      databasePermissions: false,
+      issues,
+      recommendations
+    };
+  }
+}
+
+/**
+ * Mark a scan as synced
+ * @param scanId The ID of the scan to mark as synced
+ * @returns The updated scan record
+ */
+export async function markScanAsSynced(scanId: string): Promise<ScanHistory> {
+  ProductDebug.log(`Marking scan as synced: ${scanId}`);
+  
+  try {
+    const { data, error } = await supabase
+      .from('scans')
+      .update({ 
+        synced: true 
+      } as any)
+      .eq('id', scanId)
+      .select('*')
+      .single();
+    
+    if (error) {
+      ProductDebug.error(`Error marking scan as synced: ${error.message}`, { error, scanId });
+      throw new DatabaseError(`Error marking scan as synced: ${error.message}`, error);
+    }
+    
+    if (!data) {
+      ProductDebug.error(`No data returned after marking scan as synced`, { scanId });
+      throw new DatabaseError(`No data returned after marking scan as synced`);
+    }
+    
+    ProductDebug.log(`Scan marked as synced successfully: ${scanId}`);
+    return data;
+  } catch (error) {
+    ProductDebug.error(`Error marking scan as synced:`, { error, scanId });
+    console.error('Error marking scan as synced:', error);
+    throw error;
+  }
+}
+
+/**
+ * Mark multiple scans as synced
+ * @param scanIds Array of scan IDs to mark as synced
+ * @returns The number of scans that were successfully marked as synced
+ */
+export async function markScansAsSynced(scanIds: string[]): Promise<number> {
+  if (!scanIds.length) {
+    return 0;
+  }
+  
+  ProductDebug.log(`Marking ${scanIds.length} scans as synced`);
+  
+  try {
+    const { data, error } = await supabase
+      .from('scans')
+      .update({ 
+        synced: true 
+      } as any)
+      .in('id', scanIds)
+      .select('id');
+    
+    if (error) {
+      ProductDebug.error(`Error marking scans as synced: ${error.message}`, { error, scanIds });
+      throw new DatabaseError(`Error marking scans as synced: ${error.message}`, error);
+    }
+    
+    const syncedCount = data?.length || 0;
+    ProductDebug.log(`${syncedCount} scans marked as synced successfully`);
+    return syncedCount;
+  } catch (error) {
+    ProductDebug.error(`Error marking scans as synced:`, { error, scanIds });
+    console.error('Error marking scans as synced:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get unsynced scans for a user
+ * @param userId The ID of the user
+ * @param limit The maximum number of scans to return
+ * @returns Array of unsynced scan records
+ */
+export async function getUnsyncedScans(userId: string, limit = 50): Promise<ScanHistory[]> {
+  ProductDebug.log(`Getting unsynced scans for user: ${userId}, limit: ${limit}`);
+  
+  try {
+    // Use any to bypass type checking for the database query
+    const { data, error } = await (supabase
+      .from('scans')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('synced', false)
+      .order('scanned_at', { ascending: false })
+      .limit(limit) as any);
+    
+    if (error) {
+      ProductDebug.error(`Error getting unsynced scans:`, { error, userId });
+      throw new DatabaseError(`Error getting unsynced scans: ${error.message}`, error);
+    }
+    
+    if (!data || data.length === 0) {
+      ProductDebug.log(`No unsynced scans found for user: ${userId}`);
+      return [];
+    }
+    
+    // Transform the raw data to match the ScanHistory interface
+    const scanHistory: ScanHistory[] = [];
+    
+    for (const item of data) {
+      const scan: ScanHistory = {
+        id: item.id,
+        product_id: item.product_id,
+        user_id: item.user_id,
+        scanned_at: item.scanned_at
+      };
+      
+      // Add optional fields if they exist in the data
+      if (item.source) {
+        scan.source = item.source as 'cache' | 'database' | 'api';
+      }
+      
+      if (item.synced !== undefined) {
+        scan.synced = !!item.synced;
+      }
+      
+      scanHistory.push(scan);
+    }
+    
+    ProductDebug.log(`Found ${scanHistory.length} unsynced scans for user: ${userId}`);
+    return scanHistory;
+  } catch (error) {
+    ProductDebug.error(`Error getting unsynced scans:`, { error, userId });
+    console.error('Error getting unsynced scans:', error);
+    throw error;
+  }
+}
+
+/**
+ * Sync unsynced scans for a user
+ * @param userId The ID of the user
+ * @param limit The maximum number of scans to sync
+ * @returns The number of scans that were successfully synced
+ */
+export async function syncUnsyncedScans(userId: string, limit = 50): Promise<number> {
+  ProductDebug.log(`Syncing unsynced scans for user: ${userId}, limit: ${limit}`);
+  
+  try {
+    // Get unsynced scans
+    const unsyncedScans = await getUnsyncedScans(userId, limit);
+    
+    if (unsyncedScans.length === 0) {
+      return 0;
+    }
+    
+    // Extract scan IDs
+    const scanIds = unsyncedScans.map(scan => scan.id);
+    
+    // Mark scans as synced
+    const syncedCount = await markScansAsSynced(scanIds);
+    
+    ProductDebug.log(`Synced ${syncedCount} scans for user: ${userId}`);
+    return syncedCount;
+  } catch (error) {
+    ProductDebug.error(`Error syncing unsynced scans:`, { error, userId });
+    console.error('Error syncing unsynced scans:', error);
+    throw error;
+  }
 }
